@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OptiPress Fruity 🍊 - Fresh & Local PDF & Image Compression</title>
+  <meta name="description" content="Squeeze your PDF, HEIC, PNG, JPEG, and WebP files fresh! 100% private, local browser compression with live size estimation and zero server uploads.">
+  <link rel="stylesheet" href="styles.css">
+  
+  <!-- PWA & Mobile Meta Tags -->
+  <meta name="theme-color" content="#ff6b00">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+
+  <!-- Local Bundled Processing Libraries (100% Offline Compatible) -->
+  <script src="lib/pdf.min.js"></script>
+  <script src="lib/pdf-lib.min.js"></script>
+  <script src="lib/heic2any.min.js"></script>
+  <script src="lib/jszip.min.js"></script>
+</head>
+<body>
+
+  <!-- Animated Floating Fruit Background Elements -->
+  <div class="bg-decorations" aria-hidden="true">
+    <div class="fruit-blob blob-1"></div>
+    <div class="fruit-blob blob-2"></div>
+    <div class="fruit-blob blob-3"></div>
+    <div class="floating-sticker sticker-1">🍊</div>
+    <div class="floating-sticker sticker-2">🍋</div>
+    <div class="floating-sticker sticker-3">🍓</div>
+    <div class="floating-sticker sticker-4">🍈</div>
+    <div class="floating-sticker sticker-5">🍇</div>
+    <div class="floating-sticker sticker-6">🍉</div>
+  </div>
+
+  <!-- Top App Header -->
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand">
+        <div class="brand-icon">
+          <span>🍊</span>
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-title">OptiPress Fruity</h1>
+          <p class="brand-subtitle">Squeeze Your Files Fresh & Local!</p>
+        </div>
+        <span class="brand-badge">✨ 100% Fresh & Private</span>
+      </div>
+
+      <div class="header-meta">
+        <button id="pwaInstallBtn" class="btn btn-secondary pwa-install-btn" style="display: none;">
+          <span>Install App</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Grid Dashboard -->
+  <main class="main-layout">
+
+    <!-- Left Controls Panel -->
+    <aside class="fruity-panel">
+      <h2 class="panel-title">
+
+        Squeeze Tuning
+      </h2>
+
+      <!-- Preset Selector Buttons -->
+      <div class="preset-group">
+        <button class="preset-btn" data-preset="lossless">
+          <span class="preset-emoji">🍏</span>
+          <span>Mild</span>
+        </button>
+        <button class="preset-btn active" data-preset="balanced">
+          <span class="preset-emoji">🍊</span>
+          <span>Juicy</span>
+        </button>
+        <button class="preset-btn" data-preset="maximum">
+          <span class="preset-emoji">🍋</span>
+          <span>Super Squeeze</span>
+        </button>
+      </div>
+
+      <!-- Quality Slider -->
+      <div class="control-item">
+        <div class="control-label-row">
+          <span>Quality Level</span>
+          <span id="qualityVal" class="control-value">75%</span>
+        </div>
+        <input type="range" id="qualityRange" min="5" max="100" value="75" class="fruit-slider slider-orange">
+      </div>
+
+      <!-- Resolution Scale Slider -->
+      <div class="control-item">
+        <div class="control-label-row">
+          <span>Image Dimensions</span>
+          <span id="scaleVal" class="control-value">100%</span>
+        </div>
+        <input type="range" id="scaleRange" min="20" max="100" value="100" step="5" class="fruit-slider slider-lime">
+      </div>
+
+      <!-- PDF Resolution Target DPI -->
+      <div class="control-item">
+        <div class="control-label-row">
+          <span>PDF Crispness (DPI)</span>
+        </div>
+        <select id="pdfDpiSelect" class="select-input">
+          <option value="72">72 DPI (Super Compact / Email)</option>
+          <option value="150" selected>150 DPI (Juicy Web Standard)</option>
+          <option value="200">200 DPI (High Detail Print)</option>
+          <option value="300">300 DPI (Pure Crystal Quality)</option>
+        </select>
+      </div>
+
+      <!-- Output Format Selector -->
+      <div class="control-item">
+        <div class="control-label-row">
+          <span>Output Format</span>
+        </div>
+        <select id="formatSelect" class="select-input">
+          <option value="original" selected>Auto Match Original</option>
+          <option value="image/webp">WebP (Next-Gen High Efficiency)</option>
+          <option value="image/jpeg">JPEG (Universal Compatibility)</option>
+          <option value="image/png">PNG (Preserve Transparency)</option>
+        </select>
+      </div>
+
+      <!-- Custom Target Size Sub-Card -->
+      <div class="target-size-card">
+        <div class="toggle-row">
+          <span class="target-title">Strict Target File Size</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="targetSizeToggle">
+            <span class="slider-round"></span>
+          </label>
+        </div>
+        <div id="targetSizeInputRow" style="display: none;" class="control-item">
+          <input type="number" id="targetSizeKB" class="text-input" placeholder="Enter target KB (e.g. 500)" value="500">
+        </div>
+      </div>
+
+      <!-- Live Dynamic Estimator -->
+      <div class="estimator-box">
+        <div class="estimator-header">
+          Live Juice Estimator
+        </div>
+        <div class="estimator-stats">
+          <span id="estSize" class="estimator-val">~450 KB</span>
+          <span id="estSavings" class="estimator-saving">-55% Savings</span>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Right Content Dashboard -->
+    <section class="dropzone-container">
+
+      <!-- Small Upload Button (Mobile Only) -->
+      <button id="mobileUploadBtn" class="btn btn-primary mobile-upload-btn">
+        <span>Select PDF or Images</span>
+      </button>
+
+      <!-- Drag & Drop Zone (Desktop Only) -->
+      <div id="dropzone" class="dropzone">
+        <input type="file" id="fileInput" multiple accept="image/*,.heic,.heif,.pdf" style="display: none;">
+        <div class="dropzone-icon-wrapper">
+          <div class="dropzone-fruit-icon">🍉</div>
+          <div class="dropzone-pulse"></div>
+        </div>
+        <h3 class="dropzone-title">Drop PDF or Images Here to Squeeze</h3>
+        <p class="dropzone-sub">or click anywhere to browse from your device</p>
+        <div class="supported-tags">
+          <span class="tag tag-pdf">PDF</span>
+          <span class="tag tag-heic">HEIC / HEIF</span>
+          <span class="tag tag-png">PNG</span>
+          <span class="tag tag-jpeg">JPEG</span>
+          <span class="tag tag-webp">WEBP</span>
+          <span class="tag tag-avif">AVIF</span>
+        </div>
+      </div>
+
+      <!-- File Queue & Actions Section -->
+      <div id="queueSection" style="display: none; flex-direction: column; gap: 1.25rem;">
+        <div class="queue-header">
+          <div class="queue-title">
+            Juice Basket <span id="queueBadge" class="badge-count">0 Files</span>
+          </div>
+          <div class="action-bar">
+            <button id="clearBtn" class="btn btn-danger">
+              <span>🗑️ Clear Basket</span>
+            </button>
+            <button id="compressAllBtn" class="btn btn-primary">
+              <span class="btn-icon">⚡</span>
+              <span>Squeeze All Now</span>
+            </button>
+            <button id="downloadZipBtn" class="btn btn-secondary" style="display: none;">
+              <span class="btn-icon">📦</span>
+              <span>Download ZIP Basket</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="fileList" class="file-list"></div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Side-by-side Quality Comparison Modal -->
+  <div id="compareModal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">🍊 Side-by-Side Quality Inspector</h3>
+        <button id="closeModalBtn" class="icon-btn close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="comparison-wrapper" id="compareWrapper">
+          <span class="comparison-badge left">Original (Raw)</span>
+          <span class="comparison-badge right">Compressed (Fresh Squeezed)</span>
+          <img id="compressedImgPreview" class="comparison-image" src="" alt="Compressed">
+          <img id="originalImgPreview" class="comparison-overlay-img" src="" alt="Original">
+          <div id="compareHandle" class="comparison-handle">
+            <div class="handle-pill">↔</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="compressor.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

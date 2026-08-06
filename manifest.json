@@ -1,0 +1,32 @@
+{
+  "name": "OptiPress Fruity 🍊 PDF & Image Compressor",
+  "short_name": "OptiPress",
+  "description": "100% Private, Local Browser PDF & Image Compressor. Works 100% offline with zero server uploads.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fffdf2",
+  "theme_color": "#ff6b00",
+  "categories": ["utilities", "productivity", "graphics"],
+  "icons": [
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
