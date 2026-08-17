@@ -24,6 +24,22 @@ class OptiPressEngine {
     const originalSize = file.size;
     let quality = (options.quality || 75) / 100;
     let scale = (options.scale || 100) / 100;
+
+    if (options.dimensionMode === 'custom') {
+      const customW = parseInt(options.customWidth, 10);
+      const customH = parseInt(options.customHeight, 10);
+      if (customW > 0 && customH > 0) {
+        // Approximate pixel scale against standard full-HD reference (1920x1080)
+        const refPixels = 1920 * 1080;
+        const targetPixels = customW * customH;
+        scale = Math.min(1.0, Math.sqrt(targetPixels / refPixels));
+      } else if (customW > 0) {
+        scale = Math.min(1.0, customW / 1920);
+      } else if (customH > 0) {
+        scale = Math.min(1.0, customH / 1080);
+      }
+    }
+
     const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
     const isHeic = file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
 
@@ -106,24 +122,80 @@ class OptiPressEngine {
   }
 
   /**
-   * Standard Image Compression via HTML5 Canvas
+   * Standard Image Compression via HTML5 Canvas with Custom Dimensions & Aspect Ratio Centering
    */
   async compressImage(file, options, onProgress) {
     onProgress(10, 'Loading image...');
     const imageBitmap = await this.loadImageBitmap(file);
+    const origWidth = imageBitmap.width;
+    const origHeight = imageBitmap.height;
 
-    let scale = (options.scale || 100) / 100;
-    let targetWidth = Math.max(1, Math.round(imageBitmap.width * scale));
-    let targetHeight = Math.max(1, Math.round(imageBitmap.height * scale));
+    let targetWidth;
+    let targetHeight;
+    let isCentered = false;
+    let chosenBg = options.canvasBgColor === 'black' ? '#000000' : '#ffffff';
 
     const canvas = document.createElement('canvas');
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
     const ctx = canvas.getContext('2d', { alpha: true });
-    
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+
+    if (options.dimensionMode === 'custom' && (options.customWidth > 0 || options.customHeight > 0)) {
+      const reqW = parseInt(options.customWidth, 10);
+      const reqH = parseInt(options.customHeight, 10);
+
+      if (reqW > 0 && reqH > 0) {
+        targetWidth = reqW;
+        targetHeight = reqH;
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+
+        const origRatio = origWidth / origHeight;
+        const targetRatio = targetWidth / targetHeight;
+        // Check if aspect ratio matches (within 0.8% margin)
+        const isSameRatio = Math.abs(origRatio - targetRatio) / origRatio < 0.008;
+
+        if (isSameRatio) {
+          // Same aspect ratio or proportional reduction: direct draw without background fill
+          ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+        } else {
+          // Different aspect ratio: fill background with user selected color and center the scaled image
+          isCentered = true;
+          ctx.fillStyle = chosenBg;
+          ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+          const fitScale = Math.min(targetWidth / origWidth, targetHeight / origHeight);
+          const drawW = Math.max(1, Math.round(origWidth * fitScale));
+          const drawH = Math.max(1, Math.round(origHeight * fitScale));
+          const drawX = Math.round((targetWidth - drawW) / 2);
+          const drawY = Math.round((targetHeight - drawH) / 2);
+
+          ctx.drawImage(imageBitmap, drawX, drawY, drawW, drawH);
+        }
+      } else if (reqW > 0) {
+        // Width specified only -> proportional resize
+        targetWidth = reqW;
+        targetHeight = Math.max(1, Math.round(origHeight * (reqW / origWidth)));
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+      } else if (reqH > 0) {
+        // Height specified only -> proportional resize
+        targetHeight = reqH;
+        targetWidth = Math.max(1, Math.round(origWidth * (reqH / origHeight)));
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+      }
+    } else {
+      // Percentage Scale Mode (Aspect ratio strictly preserved)
+      const scale = (options.scale || 100) / 100;
+      targetWidth = Math.max(1, Math.round(origWidth * scale));
+      targetHeight = Math.max(1, Math.round(origHeight * scale));
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+    }
 
     let mimeType = options.outputFormat || file.type || 'image/jpeg';
     if (mimeType === 'original') mimeType = file.type || 'image/jpeg';
@@ -135,7 +207,14 @@ class OptiPressEngine {
     onProgress(50, 'Optimizing quality & re-encoding...');
 
     if (options.enableTargetSize && options.targetSizeKB > 0) {
-      return await this.adaptiveBinarySearchCompress(canvas, mimeType, options.targetSizeKB * 1024, file.name, onProgress);
+      const targetRes = await this.adaptiveBinarySearchCompress(canvas, mimeType, options.targetSizeKB * 1024, file.name, onProgress);
+      return {
+        ...targetRes,
+        width: targetWidth,
+        height: targetHeight,
+        isCentered,
+        bgColor: isCentered ? (options.canvasBgColor === 'black' ? 'black' : 'white') : null
+      };
     }
 
     const quality = (options.quality || 75) / 100;
@@ -147,6 +226,8 @@ class OptiPressEngine {
       fileName: this.getOutputFileName(file.name, mimeType),
       width: targetWidth,
       height: targetHeight,
+      isCentered,
+      bgColor: isCentered ? (options.canvasBgColor === 'black' ? 'black' : 'white') : null,
       mimeType
     };
   }

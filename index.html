@@ -91,13 +91,71 @@
         <input type="range" id="qualityRange" min="5" max="100" value="75" class="fruit-slider slider-orange">
       </div>
 
-      <!-- Resolution Scale Slider -->
+      <!-- Image Dimensions Mode Selector & Controls -->
       <div class="control-item">
         <div class="control-label-row">
           <span>Image Dimensions</span>
           <span id="scaleVal" class="control-value">100%</span>
         </div>
-        <input type="range" id="scaleRange" min="20" max="100" value="100" step="5" class="fruit-slider slider-lime">
+
+        <!-- Mode Toggle Tabs (Scale vs Custom) -->
+        <div class="dim-mode-switch">
+          <button type="button" class="dim-tab-btn active" id="dimModeScaleBtn" data-mode="scale">
+            <span>📏 Scale (%)</span>
+          </button>
+          <button type="button" class="dim-tab-btn" id="dimModeCustomBtn" data-mode="custom">
+            <span>📐 Custom (px)</span>
+          </button>
+        </div>
+
+        <!-- Scale (%) Slider Container -->
+        <div id="scaleModeContainer" class="dim-mode-panel active">
+          <input type="range" id="scaleRange" min="20" max="100" value="100" step="5" class="fruit-slider slider-lime">
+        </div>
+
+        <!-- Custom (px) Dimensions Container -->
+        <div id="customModeContainer" class="dim-mode-panel" style="display: none;">
+          <div class="custom-dim-grid">
+            <div class="dim-input-group">
+              <label for="customWidth" class="dim-sublabel">Width (px)</label>
+              <input type="number" id="customWidth" class="text-input dim-number-input" placeholder="e.g. 1200" min="1" max="15000">
+            </div>
+            
+            <button type="button" id="lockAspectBtn" class="dim-lock-btn active" title="Toggle Aspect Ratio Lock">
+              <span id="lockIcon">🔒</span>
+            </button>
+
+            <div class="dim-input-group">
+              <label for="customHeight" class="dim-sublabel">Height (px)</label>
+              <input type="number" id="customHeight" class="text-input dim-number-input" placeholder="e.g. 800" min="1" max="15000">
+            </div>
+          </div>
+
+          <!-- Centering Background Color Selector -->
+          <div class="bg-choice-wrapper">
+            <div class="bg-choice-label-row">
+              <span class="dim-sublabel">Background (if image centered):</span>
+            </div>
+            <div class="bg-choice-group">
+              <button type="button" class="bg-choice-btn active" data-color="white" id="bgWhiteBtn">
+                <span class="color-dot white-dot"></span>
+                <span>White</span>
+              </button>
+              <button type="button" class="bg-choice-btn" data-color="black" id="bgBlackBtn">
+                <span class="color-dot black-dot"></span>
+                <span>Black</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Contextual Warning Notice Box -->
+          <div id="dimensionWarningBox" class="dim-warning-box">
+            <span class="warning-icon" id="dimWarningIcon">💡</span>
+            <div class="warning-text" id="dimWarningText">
+              If target aspect ratio differs from image, it will be centered on the chosen background to avoid distortion.
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- PDF Resolution Target DPI -->

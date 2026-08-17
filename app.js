@@ -25,6 +25,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const targetSizeInputRow = document.getElementById('targetSizeInputRow');
   const targetSizeKB = document.getElementById('targetSizeKB');
 
+  // Custom Dimensions Elements
+  const dimModeScaleBtn = document.getElementById('dimModeScaleBtn');
+  const dimModeCustomBtn = document.getElementById('dimModeCustomBtn');
+  const scaleModeContainer = document.getElementById('scaleModeContainer');
+  const customModeContainer = document.getElementById('customModeContainer');
+  const customWidth = document.getElementById('customWidth');
+  const customHeight = document.getElementById('customHeight');
+  const lockAspectBtn = document.getElementById('lockAspectBtn');
+  const lockIcon = document.getElementById('lockIcon');
+  const bgWhiteBtn = document.getElementById('bgWhiteBtn');
+  const bgBlackBtn = document.getElementById('bgBlackBtn');
+  const dimensionWarningBox = document.getElementById('dimensionWarningBox');
+  const dimWarningIcon = document.getElementById('dimWarningIcon');
+  const dimWarningText = document.getElementById('dimWarningText');
+
   // Estimator Elements
   const estSize = document.getElementById('estSize');
   const estSavings = document.getElementById('estSavings');
@@ -37,9 +52,13 @@ document.addEventListener('DOMContentLoaded', () => {
   const compressedImgPreview = document.getElementById('compressedImgPreview');
   const compareHandle = document.getElementById('compareHandle');
 
-  // App State Queue
+  // App State Queue & Dimension Settings
   let fileQueue = [];
   let isDraggingCompare = false;
+  let dimensionMode = 'scale'; // 'scale' | 'custom'
+  let isAspectLocked = true;
+  let canvasBgColor = 'white'; // 'white' | 'black'
+  let activeAspectRatio = null; // Width / Height
 
   // Preset Handlers
   presetBtns.forEach(btn => {
@@ -75,6 +94,98 @@ document.addEventListener('DOMContentLoaded', () => {
     triggerEstimator();
   });
 
+  // Dimension Mode Toggle Handlers
+  dimModeScaleBtn.addEventListener('click', () => {
+    dimensionMode = 'scale';
+    dimModeScaleBtn.classList.add('active');
+    dimModeCustomBtn.classList.remove('active');
+    scaleModeContainer.style.display = 'block';
+    customModeContainer.style.display = 'none';
+    updateControlLabels();
+    triggerEstimator();
+  });
+
+  dimModeCustomBtn.addEventListener('click', () => {
+    dimensionMode = 'custom';
+    dimModeCustomBtn.classList.add('active');
+    dimModeScaleBtn.classList.remove('active');
+    scaleModeContainer.style.display = 'none';
+    customModeContainer.style.display = 'flex';
+
+    // Auto-fill width/height from queue if empty
+    if (!customWidth.value && !customHeight.value) {
+      const firstImg = fileQueue.find(item => item.originalWidth && item.originalHeight);
+      if (firstImg) {
+        customWidth.value = firstImg.originalWidth;
+        customHeight.value = firstImg.originalHeight;
+        activeAspectRatio = firstImg.originalWidth / firstImg.originalHeight;
+      } else {
+        customWidth.value = '1200';
+        customHeight.value = '800';
+        activeAspectRatio = 1200 / 800;
+      }
+    } else if (customWidth.value && customHeight.value) {
+      activeAspectRatio = parseFloat(customWidth.value) / parseFloat(customHeight.value);
+    }
+
+    updateControlLabels();
+    updateDimensionWarning();
+    triggerEstimator();
+  });
+
+  // Custom Dimension Inputs & Aspect Ratio Locking Handlers
+  customWidth.addEventListener('input', () => {
+    const w = parseFloat(customWidth.value);
+    if (isAspectLocked && w > 0 && activeAspectRatio) {
+      customHeight.value = Math.max(1, Math.round(w / activeAspectRatio));
+    } else if (!isAspectLocked && w > 0 && parseFloat(customHeight.value) > 0) {
+      activeAspectRatio = w / parseFloat(customHeight.value);
+    }
+    updateControlLabels();
+    updateDimensionWarning();
+    triggerEstimator();
+  });
+
+  customHeight.addEventListener('input', () => {
+    const h = parseFloat(customHeight.value);
+    if (isAspectLocked && h > 0 && activeAspectRatio) {
+      customWidth.value = Math.max(1, Math.round(h * activeAspectRatio));
+    } else if (!isAspectLocked && h > 0 && parseFloat(customWidth.value) > 0) {
+      activeAspectRatio = parseFloat(customWidth.value) / h;
+    }
+    updateControlLabels();
+    updateDimensionWarning();
+    triggerEstimator();
+  });
+
+  lockAspectBtn.addEventListener('click', () => {
+    isAspectLocked = !isAspectLocked;
+    lockAspectBtn.classList.toggle('active', isAspectLocked);
+    lockIcon.textContent = isAspectLocked ? '🔒' : '🔓';
+    lockAspectBtn.title = isAspectLocked ? 'Aspect Ratio Locked' : 'Aspect Ratio Unlocked';
+
+    const w = parseFloat(customWidth.value);
+    const h = parseFloat(customHeight.value);
+    if (isAspectLocked && w > 0 && h > 0) {
+      activeAspectRatio = w / h;
+    }
+  });
+
+  // Background Color Selector Handlers
+  bgWhiteBtn.addEventListener('click', () => {
+    canvasBgColor = 'white';
+    bgWhiteBtn.classList.add('active');
+    bgBlackBtn.classList.remove('active');
+    updateDimensionWarning();
+  });
+
+  bgBlackBtn.addEventListener('click', () => {
+    canvasBgColor = 'black';
+    bgBlackBtn.classList.add('active');
+    bgWhiteBtn.classList.remove('active');
+    updateDimensionWarning();
+  });
+
   pdfDpiSelect.addEventListener('change', triggerEstimator);
   formatSelect.addEventListener('change', triggerEstimator);
 
@@ -87,7 +198,58 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateControlLabels() {
     qualityVal.textContent = `${qualityRange.value}%`;
-    scaleVal.textContent = `${scaleRange.value}%`;
+    if (dimensionMode === 'scale') {
+      scaleVal.textContent = `${scaleRange.value}%`;
+    } else {
+      const w = customWidth.value || '?';
+      const h = customHeight.value || '?';
+      scaleVal.textContent = `${w}×${h}px`;
+    }
+  }
+
+  // Dynamic Aspect Ratio & Centering Warning Evaluator
+  function updateDimensionWarning() {
+    if (dimensionMode !== 'custom') return;
+
+    const reqW = parseInt(customWidth.value, 10);
+    const reqH = parseInt(customHeight.value, 10);
+
+    if (!reqW || !reqH || reqW <= 0 || reqH <= 0) {
+      dimensionWarningBox.className = 'dim-warning-box';
+      dimWarningIcon.textContent = '💡';
+      dimWarningText.textContent = 'Specify both width and height. Images with mismatched aspect ratios will be centered.';
+      return;
+    }
+
+    const targetRatio = reqW / reqH;
+    const imageItems = fileQueue.filter(item => item.originalWidth && item.originalHeight);
+
+    if (imageItems.length === 0) {
+      dimensionWarningBox.className = 'dim-warning-box';
+      dimWarningIcon.textContent = '💡';
+      dimWarningText.textContent = `Target size: ${reqW}×${reqH}px. Images matching this ratio resize directly; others will be centered with a ${canvasBgColor} background.`;
+      return;
+    }
+
+    let hasMismatch = false;
+
+    imageItems.forEach(item => {
+      const imgRatio = item.originalWidth / item.originalHeight;
+      const diff = Math.abs(imgRatio - targetRatio) / imgRatio;
+      if (diff >= 0.008) {
+        hasMismatch = true;
+      }
+    });
+
+    if (hasMismatch) {
+      dimensionWarningBox.className = 'dim-warning-box warning';
+      dimWarningIcon.textContent = '⚠️';
+      dimWarningText.textContent = `Aspect ratio differs from original image! Image will be proportionally fitted & centered on a ${canvasBgColor.toUpperCase()} background to prevent distortion.`;
+    } else {
+      dimensionWarningBox.className = 'dim-warning-box success';
+      dimWarningIcon.textContent = '✓';
+      dimWarningText.textContent = 'Proportional match: Image matches target aspect ratio perfectly (no background borders needed).';
+    }
   }
 
   // Real-Time Estimator Updates
@@ -117,6 +279,10 @@ document.addEventListener('DOMContentLoaded', () => {
     return {
       quality: parseInt(qualityRange.value, 10),
       scale: parseInt(scaleRange.value, 10),
+      dimensionMode: dimensionMode,
+      customWidth: parseInt(customWidth.value, 10) || null,
+      customHeight: parseInt(customHeight.value, 10) || null,
+      canvasBgColor: canvasBgColor,
       pdfDpi: parseInt(pdfDpiSelect.value, 10),
       outputFormat: formatSelect.value,
       enableTargetSize: targetSizeToggle.checked,
@@ -166,12 +332,44 @@ document.addEventListener('DOMContentLoaded', () => {
         status: 'idle', // idle, processing, done, error
         progress: 0,
         result: null,
-        error: null
+        error: null,
+        originalWidth: null,
+        originalHeight: null
       };
+
+      // Probe image dimensions for instant aspect ratio awareness
+      const ext = file.name.split('.').pop().toUpperCase();
+      const isImg = file.type.startsWith('image/') || ['JPG', 'JPEG', 'PNG', 'WEBP'].includes(ext);
+      if (isImg) {
+        const probeImg = new Image();
+        const probeUrl = URL.createObjectURL(file);
+        probeImg.onload = () => {
+          URL.revokeObjectURL(probeUrl);
+          item.originalWidth = probeImg.naturalWidth;
+          item.originalHeight = probeImg.naturalHeight;
+
+          // If custom dimension inputs are currently blank, pre-fill from first image
+          if (!customWidth.value && !customHeight.value) {
+            customWidth.value = probeImg.naturalWidth;
+            customHeight.value = probeImg.naturalHeight;
+            activeAspectRatio = probeImg.naturalWidth / probeImg.naturalHeight;
+            updateControlLabels();
+          }
+          updateDimensionWarning();
+          triggerEstimator();
+          renderQueue();
+        };
+        probeImg.onerror = () => {
+          URL.revokeObjectURL(probeUrl);
+        };
+        probeImg.src = probeUrl;
+      }
+
       fileQueue.push(item);
     });
 
     renderQueue();
+    updateDimensionWarning();
     triggerEstimator();
   }
 
@@ -227,9 +425,21 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       let metaText = `${formatBytes(item.file.size)}`;
+      if (item.originalWidth && item.originalHeight) {
+        metaText += ` (${item.originalWidth}×${item.originalHeight})`;
+      }
+
       if (item.status === 'done' && item.result) {
         const savedPercent = Math.max(0, Math.round((1 - (item.result.blob.size / item.file.size)) * 100));
-        metaText += ` ➔ <strong style="color: var(--text-dark);">${formatBytes(item.result.blob.size)}</strong> <span class="savings-tag">-${savedPercent}% Saved</span>`;
+        metaText += ` ➔ <strong style="color: var(--text-dark);">${formatBytes(item.result.blob.size)}</strong>`;
+        if (item.result.width && item.result.height) {
+          metaText += ` (${item.result.width}×${item.result.height})`;
+        }
+        metaText += ` <span class="savings-tag">-${savedPercent}% Saved</span>`;
+        if (item.result.isCentered) {
+          const bgText = item.result.bgColor === 'black' ? 'Black BG' : 'White BG';
+          metaText += ` <span class="tag tag-centered" style="font-size: 0.72rem; padding: 0.1rem 0.45rem; background: ${item.result.bgColor === 'black' ? '#222' : '#f0f0f0'}; color: ${item.result.bgColor === 'black' ? '#fff' : '#333'}; border: 1px solid #ccc;">🔲 Centered (${bgText})</span>`;
+        }
       }
 
       card.innerHTML = `
@@ -261,6 +471,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const id = btn.dataset.id;
         fileQueue = fileQueue.filter(item => item.id !== id);
         renderQueue();
+        updateDimensionWarning();
         triggerEstimator();
       };
     });
@@ -290,6 +501,7 @@ document.addEventListener('DOMContentLoaded', () => {
   clearBtn.onclick = () => {
     fileQueue = [];
     renderQueue();
+    updateDimensionWarning();
     triggerEstimator();
   };
 
