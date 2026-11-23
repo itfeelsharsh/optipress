@@ -46,14 +46,19 @@
     customHeight: '',
     aspectLocked: true,
     letterbox: 'white',
+    background: 'white',
+    fitMode: 'fit',
+    anchor: 'center',
     format: 'auto',
+    customMime: '',
     pdfMode: 'raster',
     pdfDpi: 150,
     targetEnabled: false,
+    targetMode: 'exact',
     targetKB: 500
   };
 
-  var IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'bmp', 'svg', 'heic', 'heif'];
+  var IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'bmp', 'svg', 'heic', 'heif', 'tif', 'tiff', 'jxl', 'ico'];
   var PDF_EXTENSIONS = ['pdf'];
 
   function clampNumber(value, min, max) {
@@ -190,6 +195,66 @@
     };
   }
 
+  var ANCHOR_POINTS = {
+    'top-left': [0, 0],
+    top: [0.5, 0],
+    'top-right': [1, 0],
+    left: [0, 0.5],
+    center: [0.5, 0.5],
+    right: [1, 0.5],
+    'bottom-left': [0, 1],
+    bottom: [0.5, 1],
+    'bottom-right': [1, 1]
+  };
+
+  function anchorPoint(anchor) {
+    return ANCHOR_POINTS[anchor] || ANCHOR_POINTS.center;
+  }
+
+  /**
+   * Crop (fill) or letterbox (fit) geometry. All values are in source/output
+   * pixels and can be passed straight to drawImage.
+   */
+  function computeCropRect(srcWidth, srcHeight, dstWidth, dstHeight, fitMode, anchor) {
+    var sw = Math.max(1, Number(srcWidth) || 1);
+    var sh = Math.max(1, Number(srcHeight) || 1);
+    var dw = Math.max(1, Number(dstWidth) || 1);
+    var dh = Math.max(1, Number(dstHeight) || 1);
+
+    if (fitMode === 'fill') {
+      var scale = Math.max(dw / sw, dh / sh);
+      var cropW = Math.min(sw, dw / scale);
+      var cropH = Math.min(sh, dh / scale);
+      var point = anchorPoint(anchor);
+      return {
+        sx: (sw - cropW) * point[0],
+        sy: (sh - cropH) * point[1],
+        sWidth: cropW,
+        sHeight: cropH,
+        dx: 0,
+        dy: 0,
+        dWidth: dw,
+        dHeight: dh,
+        mode: 'fill',
+        covers: true
+      };
+    }
+
+    var rect = fitRect(sw, sh, dw, dh);
+    return {
+      sx: 0,
+      sy: 0,
+      sWidth: sw,
+      sHeight: sh,
+      dx: rect.x,
+      dy: rect.y,
+      dWidth: rect.width,
+      dHeight: rect.height,
+      mode: 'fit',
+      covers: rect.covers
+    };
+  }
+
   function ratiosClose(aWidth, aHeight, bWidth, bHeight, tolerance) {
     var ar = (Number(aWidth) || 1) / (Number(aHeight) || 1);
     var br = (Number(bWidth) || 1) / (Number(bHeight) || 1);
@@ -203,9 +268,20 @@
       case 'image/png': return 'png';
       case 'image/webp': return 'webp';
       case 'image/avif': return 'avif';
+      case 'image/gif': return 'gif';
+      case 'image/bmp': return 'bmp';
+      case 'image/svg+xml': return 'svg';
+      case 'image/heic': return 'heic';
+      case 'image/heif': return 'heif';
+      case 'image/jxl': return 'jxl';
+      case 'image/tiff': return 'tiff';
+      case 'image/x-icon': return 'ico';
       case 'application/pdf': return 'pdf';
       case 'application/zip': return 'zip';
-      default: return 'bin';
+      default: {
+        if (mime && mime.indexOf('image/') === 0) return mime.slice(6).replace(/[^a-z0-9-]/g, '') || 'img';
+        return 'bin';
+      }
     }
   }
 
@@ -237,6 +313,12 @@
       if (input === 'image/jpeg' && supported('image/jpeg')) return 'image/jpeg';
       if (input === 'image/webp' && supported('image/webp')) return 'image/webp';
       if (input === 'image/avif' && supported('image/avif')) return 'image/avif';
+      return bestLossy(hasAlpha);
+    }
+
+    if (choice === 'custom') {
+      var custom = String(context.customMime || '').toLowerCase();
+      if (/^image\/[a-z0-9.+-]+$/.test(custom)) return custom;
       return bestLossy(hasAlpha);
     }
 
@@ -302,10 +384,15 @@
       s.customWidth,
       s.customHeight,
       s.letterbox,
+      s.background,
+      s.fitMode,
+      s.anchor,
       s.format,
+      s.customMime,
       s.pdfMode,
       s.pdfDpi,
       s.targetEnabled ? 1 : 0,
+      s.targetMode,
       s.targetKB
     ].join('|');
   }
@@ -322,18 +409,131 @@
       customHeight: toPositiveInt(input.customHeight) || '',
       aspectLocked: input.aspectLocked === undefined ? base.aspectLocked : !!input.aspectLocked,
       letterbox: input.letterbox === 'black' ? 'black' : 'white',
-      format: ['auto', 'original', 'image/webp', 'image/jpeg', 'image/png', 'image/avif'].indexOf(input.format) !== -1
+      background: ['white', 'black', 'transparent'].indexOf(input.background) !== -1
+        ? input.background
+        : (input.letterbox === 'black' ? 'black' : base.background),
+      fitMode: input.fitMode === 'fill' ? 'fill' : 'fit',
+      anchor: ANCHOR_POINTS[input.anchor] ? input.anchor : 'center',
+      format: ['auto', 'original', 'custom', 'image/webp', 'image/jpeg', 'image/png', 'image/avif'].indexOf(input.format) !== -1
         ? input.format
         : base.format,
+      customMime: /^image\/[a-z0-9.+-]+$/i.test(String(input.customMime || ''))
+        ? String(input.customMime).toLowerCase()
+        : '' ,
       pdfMode: input.pdfMode === 'structure' ? 'structure' : 'raster',
       pdfDpi: [72, 150, 200, 300].indexOf(Number(input.pdfDpi)) !== -1
         ? Number(input.pdfDpi)
         : base.pdfDpi,
       targetEnabled: !!input.targetEnabled,
+      targetMode: input.targetMode === 'atMost' ? 'atMost' : 'exact',
       targetKB: Math.round(clampNumber(input.targetKB === undefined ? base.targetKB : input.targetKB, 10, 200000))
     };
     if (!PRESETS[out.preset]) out.preset = 'custom';
     return out;
+  }
+
+  function parsePageSpec(input, pageCount, options) {
+    var opts = options || {};
+    var total = Math.max(0, Math.round(Number(pageCount) || 0));
+    var text = String(input === undefined || input === null ? '' : input).trim().toLowerCase();
+    var pages = [];
+    var seen = new Set();
+    var errors = [];
+
+    if (!text || text === 'all' || text === '*') {
+      for (var p = 1; p <= total; p++) pages.push(p);
+      return { pages: pages, errors: errors };
+    }
+
+    var tokens = text.split(/[,\s]+/).filter(Boolean);
+    tokens.forEach(function (token) {
+      if (token === 'odd' || token === 'even') {
+        var parity = token === 'odd' ? 1 : 0;
+        for (var n = 1; n <= total; n++) {
+          if (n % 2 === parity) {
+            if (!opts.ordered && seen.has(n)) continue;
+            if (opts.ordered && seen.has(n)) {
+              errors.push('Page ' + n + ' appears more than once.');
+              continue;
+            }
+            seen.add(n);
+            pages.push(n);
+          }
+        }
+        return;
+      }
+
+      var match = /^(\d+)(?:\s*-\s*(\d+)?)?$/.exec(token);
+      if (!match) {
+        errors.push('“' + token + '” is not a page or range.');
+        return;
+      }
+      var start = parseInt(match[1], 10);
+      var hasDash = token.indexOf('-') !== -1;
+      var end = !hasDash ? start : match[2] === undefined ? total : parseInt(match[2], 10);
+      if (!start || start < 1) {
+        errors.push('Page numbers start at 1.');
+        start = 1;
+      }
+      if (!end || end < 1) end = total;
+      if (start > end) {
+        var swap = start;
+        start = end;
+        end = swap;
+      }
+      if (end > total) {
+        errors.push('Pages ' + start + '–' + end + ' are outside 1–' + total + '.');
+        end = total;
+      }
+      for (var i = start; i <= end; i++) {
+        if (seen.has(i)) {
+          if (opts.ordered) errors.push('Page ' + i + ' appears more than once.');
+          continue;
+        }
+        seen.add(i);
+        pages.push(i);
+      }
+    });
+
+    if (opts.requireAll && pages.length !== total) {
+      errors.push('Include every page exactly once (' + pages.length + ' of ' + total + ').');
+    }
+    if (!pages.length && !errors.length) errors.push('No pages selected.');
+    return { pages: pages, errors: errors };
+  }
+
+  function parseSplitSpec(input, pageCount, mode, everyN) {
+    var total = Math.max(1, Math.round(Number(pageCount) || 1));
+    if (mode === 'every') {
+      var size = Math.max(1, Math.round(Number(everyN) || 1));
+      var parts = [];
+      for (var start = 1; start <= total; start += size) {
+        var pages = [];
+        for (var p = start; p < start + size && p <= total; p++) pages.push(p);
+        parts.push(pages);
+      }
+      return { parts: parts, errors: [] };
+    }
+
+    var groups = String(input || '').split(';');
+    var partsOut = [];
+    var errors = [];
+    var used = new Set();
+    groups.forEach(function (group, index) {
+      if (!group.trim()) return;
+      var parsed = parsePageSpec(group, total);
+      if (!parsed.pages.length) return;
+      parsed.errors.forEach(function (error) {
+        errors.push('Part ' + (index + 1) + ': ' + error);
+      });
+      parsed.pages.forEach(function (page) {
+        if (used.has(page)) errors.push('Page ' + page + ' is in more than one part.');
+        used.add(page);
+      });
+      partsOut.push(parsed.pages);
+    });
+    if (!partsOut.length) errors.push('Add at least one page range.');
+    return { parts: partsOut, errors: errors };
   }
 
   return {
@@ -355,7 +555,11 @@
     computeTargetDims: computeTargetDims,
     capCanvasDims: capCanvasDims,
     fitRect: fitRect,
+    computeCropRect: computeCropRect,
+    anchorPoint: anchorPoint,
     ratiosClose: ratiosClose,
+    parsePageSpec: parsePageSpec,
+    parseSplitSpec: parseSplitSpec,
     mimeExtension: mimeExtension,
     resolveOutputMime: resolveOutputMime,
     sanitizeBase: sanitizeBase,

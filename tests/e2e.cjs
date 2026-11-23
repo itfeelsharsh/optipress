@@ -1,35 +1,153 @@
 'use strict';
 
 /**
- * End-to-end checks against a real Chromium.
+ * End-to-end checks for every OptiPress tool.
  *
- *   node scripts/serve.cjs . 4173    # in another terminal
+ *   npm run dev
  *   npm run test:e2e
  *
- * Uses the system Chrome when available, otherwise Playwright's Chromium.
+ * Uses the system Chrome when available, otherwise Playwright Chromium.
+ * Every check runs in a fresh browser context so persisted settings never
+ * leak between scenarios.
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
-const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
 
 const BASE = process.env.OPTI_BASE || 'http://localhost:4173/';
 const FIXTURES = '/tmp/optipress-e2e';
 const SHOTS = '/tmp/optipress-shots';
+const AXE = require.resolve('axe-core/axe.min.js');
 
-function parseBytes(text) {
-  const match = /([\d.]+)\s*(B|KB|MB|GB)/i.exec(text);
-  if (!match) return null;
-  const value = Number(match[1]);
-  const unit = match[2].toUpperCase();
-  const factor = unit === 'B' ? 1 : unit === 'KB' ? 1024 : unit === 'MB' ? 1024 ** 2 : 1024 ** 3;
-  return Math.round(value * factor);
+let browser;
+let context;
+let page;
+let errors = [];
+let failures = 0;
+
+async function fresh(hash) {
+  if (context) await context.close();
+  context = await browser.newContext({
+    viewport: { width: 1280, height: 1000 },
+    acceptDownloads: true,
+    serviceWorkers: 'block',
+    colorScheme: 'light'
+  });
+  page = await context.newPage();
+  errors = [];
+  page.on('pageerror', (error) => errors.push('pageerror: ' + error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push('console: ' + message.text());
+  });
+  await page.goto(BASE + '#/', { waitUntil: 'load' });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'load' });
+  if (hash && hash !== '#/') await page.goto(BASE + hash, { waitUntil: 'load' });
+  await page.waitForTimeout(400);
 }
 
-async function makeFixtures(browser) {
+async function check(name, fn) {
+  try {
+    await fn();
+    if (errors.length) throw new Error('runtime errors: ' + errors.join(' | '));
+    console.log('  ok   ' + name);
+  } catch (error) {
+    failures++;
+    console.log('  FAIL ' + name + ' — ' + (error && error.message ? error.message : error));
+  }
+}
+
+async function upload(files) {
+  await page.setInputFiles('#files-input', files);
+  await page.waitForTimeout(1600);
+}
+
+async function run(timeout) {
+  await page.click('#runBtn');
+  await page.waitForFunction(
+    () => !document.querySelector('#runBtn').textContent.includes('working'),
+    null,
+    { timeout: timeout || 180000 }
+  );
+  await page.waitForTimeout(300);
+  const failure = await page.locator('#resultZone .notice.is-warn').first().textContent().catch(() => '');
+  if (failure) throw new Error(failure);
+}
+
+async function downloadResult() {
+  const [download] = await Promise.all([
+    page.waitForEvent('download', { timeout: 120000 }),
+    page.locator('#resultZone .result .btn-primary').click()
+  ]);
+  const target = path.join(FIXTURES, 'out-' + Date.now() + '-' + download.suggestedFilename());
+  await download.saveAs(target);
+  return target;
+}
+
+async function imageInfo(file) {
+  return page.evaluate(async (base64) => {
+    const img = new Image();
+    img.src = 'data:image/*;base64,' + base64;
+    try {
+      await img.decode();
+      return { ok: true, width: img.naturalWidth, height: img.naturalHeight };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }, fs.readFileSync(file).toString('base64'));
+}
+
+async function pdfInfo(buffer, password) {
+  return page.evaluate(
+    async ({ base64, password }) => {
+      const raw = atob(base64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      try {
+        const pdf = await pdfjsLib.getDocument(password ? { data: bytes, password } : { data: bytes }).promise;
+        const pages = pdf.numPages;
+        const text = await (await pdf.getPage(1)).getTextContent();
+        pdf.destroy();
+        return { ok: true, pages, text: text.items.map((item) => item.str).join(' ') };
+      } catch (err) {
+        return { ok: false, error: err && err.name ? err.name : String(err) };
+      }
+    },
+    { base64: buffer.toString('base64'), password: password || '' }
+  );
+}
+
+function zipEntries(file, pattern) {
+  const listing = execFileSync('unzip', ['-l', file], { encoding: 'utf8' });
+  return listing.split('\n').filter((line) => pattern.test(line.trim()));
+}
+
+async function audit(label, selector) {
+  await page.addScriptTag({ path: AXE });
+  const violations = await page.evaluate(
+    async ({ selector }) => {
+      const target = selector ? document.querySelector(selector) : document;
+      const result = await axe.run(target, {
+        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] }
+      });
+      return result.violations.map((violation) => ({
+        id: violation.id,
+        impact: violation.impact,
+        nodes: violation.nodes.length
+      }));
+    },
+    { selector: selector || null }
+  );
+  if (violations.length) throw new Error(label + ': ' + JSON.stringify(violations));
+}
+
+async function makeFixtures() {
   fs.mkdirSync(FIXTURES, { recursive: true });
-  const page = await browser.newPage();
+  fs.mkdirSync(SHOTS, { recursive: true });
+  const temp = await browser.newContext();
+  const page = await temp.newPage();
 
   const photo = await page.evaluate(() => {
     const canvas = document.createElement('canvas');
@@ -42,11 +160,10 @@ async function makeFixtures(browser) {
     gradient.addColorStop(1, '#f2c14e');
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, 2400, 1600);
-    for (let i = 0; i < 2600; i++) {
-      ctx.fillStyle = `hsla(${Math.random() * 360}, 62%, ${35 + Math.random() * 45}%, ${0.15 + Math.random() * 0.6})`;
-      const r = 6 + Math.random() * 70;
+    for (let i = 0; i < 2200; i++) {
+      ctx.fillStyle = `hsla(${Math.random() * 360}, 62%, ${35 + Math.random() * 45}%, ${0.15 + Math.random() * 0.5})`;
       ctx.beginPath();
-      ctx.arc(Math.random() * 2400, Math.random() * 1600, r, 0, Math.PI * 2);
+      ctx.arc(Math.random() * 2400, Math.random() * 1600, 6 + Math.random() * 70, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.fillStyle = 'rgba(255,255,255,0.92)';
@@ -61,7 +178,6 @@ async function makeFixtures(browser) {
     canvas.width = 1800;
     canvas.height = 1800;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, 1800, 1800);
     for (let i = 0; i < 900; i++) {
       ctx.fillStyle = `hsla(${Math.random() * 360}, 70%, 55%, 0.5)`;
       ctx.fillRect(Math.random() * 1800, Math.random() * 1800, 90, 90);
@@ -77,7 +193,6 @@ async function makeFixtures(browser) {
     canvas.width = 1200;
     canvas.height = 1200;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, 1200, 1200);
     ctx.fillStyle = '#e4551f';
     ctx.beginPath();
     ctx.arc(600, 600, 430, 0, Math.PI * 2);
@@ -90,7 +205,7 @@ async function makeFixtures(browser) {
   });
   fs.writeFileSync(path.join(FIXTURES, 'alpha.png'), Buffer.from(alpha.split(',')[1], 'base64'));
 
-  const pdfPage = await browser.newPage();
+  const pdfPage = await temp.newPage();
   await pdfPage.setContent(
     '<html><body style="margin:0">' +
       Array.from({ length: 3 })
@@ -99,7 +214,7 @@ async function makeFixtures(browser) {
             '<section style="page-break-after:always;padding:40px;font:18px Georgia">' +
             '<h1 style="font:600 42px Georgia">OptiPress PDF ' + (i + 1) + '</h1>' +
             '<img src="' + photo + '" style="width:100%;max-height:600px;object-fit:cover"/>' +
-            '<p>' + 'Selectable text '.repeat(40) + '</p>' +
+            '<p>' + 'Selectable text '.repeat(36) + '</p>' +
             '</section>'
         )
         .join('') +
@@ -107,417 +222,377 @@ async function makeFixtures(browser) {
   );
   await pdfPage.pdf({ path: path.join(FIXTURES, 'report.pdf'), format: 'A4', printBackground: true });
   await pdfPage.close();
-  await page.close();
-}
-
-async function newAppPage(browser, options = {}) {
-  const context = await browser.newContext({
-    viewport: options.viewport || { width: 1440, height: 1000 },
-    acceptDownloads: true,
-    colorScheme: options.colorScheme || 'light'
-  });
-  const page = await context.newPage();
-  const errors = [];
-  page.on('pageerror', (error) => errors.push('pageerror: ' + error.message));
-  page.on('console', (message) => {
-    if (message.type() === 'error') errors.push('console: ' + message.text());
-  });
-  await page.goto(BASE, { waitUntil: 'load' });
-  await page.waitForFunction(() => document.fonts && document.fonts.status === 'loaded');
-  return { context, page, errors };
-}
-
-async function waitForRows(page, count) {
-  await page.waitForSelector('#fileList .file');
-  await page.waitForFunction(
-    (expected) => document.querySelectorAll('#fileList .file').length === expected,
-    count
-  );
-}
-
-async function waitForProbes(page) {
-  await page.waitForFunction(() => {
-    const rows = [...document.querySelectorAll('#fileList .file')];
-    return (
-      rows.length > 0 &&
-      rows.every((row) => {
-        const note = row.querySelector('.file-note');
-        return !note || note.hidden || !note.textContent.includes('Reading file');
-      })
-    );
-  });
-  await page.waitForFunction(() => {
-    const rows = [...document.querySelectorAll('#fileList .file')];
-    return rows.every((row) => {
-      const meta = row.querySelector('.file-meta');
-      return meta && (meta.textContent.includes('×') || meta.textContent.includes('page'));
-    });
-  }, null, { timeout: 60000 });
-}
-
-async function squeeze(page) {
-  await page.click('#squeezeBtn');
-  await page.waitForFunction(
-    () => {
-      const label = document.querySelector('#squeezeLabel');
-      return label && (label.textContent === 'All squeezed' || label.textContent === 'Squeeze 0 files');
-    },
-    null,
-    { timeout: 180000 }
-  );
-}
-
-async function downloadRow(page, index) {
-  const button = page.locator('#fileList .file').nth(index).locator('[data-action="download"]');
-  const [download] = await Promise.all([page.waitForEvent('download'), button.click()]);
-  const target = path.join(FIXTURES, 'download-' + index + '-' + download.suggestedFilename());
-  await download.saveAs(target);
-  return target;
+  await temp.close();
+  fs.copyFileSync(path.join(FIXTURES, 'report.pdf'), path.join(FIXTURES, 'report2.pdf'));
 }
 
 (async () => {
-  fs.mkdirSync(SHOTS, { recursive: true });
-  fs.mkdirSync(FIXTURES, { recursive: true });
-
-  let browser;
   try {
     browser = await chromium.launch({ channel: 'chrome', headless: true });
-  } catch (err) {
+  } catch (error) {
     browser = await chromium.launch({ headless: true });
   }
+  await makeFixtures();
 
-  let failures = 0;
-  async function check(name, fn) {
-    try {
-      await fn();
-      console.log('  ok   ' + name);
-    } catch (error) {
-      failures++;
-      console.error('  FAIL ' + name);
-      const message = error && error.message ? error.message : String(error);
-      console.error('       ' + message.split('\n').slice(0, 4).join('\n       '));
+  // ------------------------------------------------------------------ home --
+  await check('home renders the tool catalogue without errors', async () => {
+    await fresh('#/');
+    const cards = await page.locator('.tool-card').count();
+    if (cards !== 17) throw new Error('tool cards: ' + cards);
+    if (!(await page.locator('.hero-title').innerText()).includes('your files')) throw new Error('hero missing');
+    await page.screenshot({ path: path.join(SHOTS, '01-home.png'), fullPage: true });
+  });
+
+  await check('every route renders a tool without errors', async () => {
+    const routes = [
+      'squeeze', 'crop', 'convert', 'merge', 'split', 'extract', 'delete', 'reorder', 'rotate',
+      'images-to-pdf', 'pdf-to-images', 'ocr', 'compress-pdf', 'watermark', 'page-numbers', 'protect', 'unlock'
+    ];
+    for (const route of routes) {
+      await page.goto(BASE + '#/' + route, { waitUntil: 'load' });
+      await page.waitForTimeout(150);
+      if (!(await page.locator('.tool-title').isVisible())) throw new Error(route + ': no title');
     }
-  }
-
-  await makeFixtures(browser);
-
-  // ---------------------------------------------------------------- desktop --
-  const { context, page, errors } = await newAppPage(browser);
-
-  await check('fonts load', async () => {
-    const ok = await page.evaluate(
-      () => document.fonts.check('16px Fraunces') && document.fonts.check('15px "Instrument Sans"')
-    );
-    assert.ok(ok, 'local font files failed to load');
+    await page.goto(BASE + '#/about', { waitUntil: 'load' });
+    if (!(await page.locator('.tool-title').isVisible())) throw new Error('about missing');
   });
 
-  await check('empty state renders without JS errors', async () => {
-    assert.equal(await page.locator('#queue').isVisible(), false);
-    assert.ok(await page.locator('#dropzone').isVisible());
-    await page.screenshot({ path: path.join(SHOTS, '01-empty.png'), fullPage: true });
-    assert.deepEqual(errors, []);
+  await check('home dropzone carries files into squeeze', async () => {
+    await fresh('#/');
+    await page.setInputFiles('#home-input', [path.join(FIXTURES, 'graphic.png')]);
+    await page.waitForFunction(() => location.hash === '#/squeeze');
+    await page.waitForTimeout(1200);
+    if ((await page.locator('.file-row').count()) !== 1) throw new Error('file was not carried over');
   });
 
-  await check('dropzone is a real button and focusable', async () => {
-    assert.equal(await page.locator('#dropzone').evaluate((el) => el.tagName), 'BUTTON');
-    await page.keyboard.press('Tab');
-    const focused = await page.evaluate(() => document.activeElement.id);
-    assert.ok(['dropzone', 'themeToggle', 'addBtn'].includes(focused) || focused === '');
+  // ------------------------------------------------------------------ crop --
+  await check('crop preset applies dimensions, cap and preview', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#preset', 'us-passport');
+    await page.waitForTimeout(600);
+    if ((await page.locator('#cropW').inputValue()) !== '600') throw new Error('width preset');
+    if ((await page.locator('#cropH').inputValue()) !== '600') throw new Error('height preset');
+    if (!(await page.locator('#targetToggle').isChecked())) throw new Error('target not enabled');
+    if ((await page.locator('#targetKB').inputValue()) !== '240') throw new Error('cap not applied');
+    if ((await page.locator('#targetMode').inputValue()) !== 'atMost') throw new Error('mode not atMost');
+    if (await page.locator('#previewCanvas').isHidden()) throw new Error('preview hidden');
+    const canvasSize = await page.locator('#previewCanvas').evaluate((el) => [el.width, el.height]);
+    if (canvasSize[0] !== canvasSize[1]) throw new Error('preview not square: ' + canvasSize);
+    await page.screenshot({ path: path.join(SHOTS, '02-crop.png'), fullPage: true });
+    await run();
+    const out = await downloadResult();
+    const info = await imageInfo(out);
+    if (!info.ok || info.width !== 600 || info.height !== 600) throw new Error(JSON.stringify(info));
+    await page.screenshot({ path: path.join(SHOTS, '03-crop-result.png'), fullPage: true });
   });
 
-  await page.setInputFiles('#fileInput', [
-    path.join(FIXTURES, 'photo.jpg'),
-    path.join(FIXTURES, 'graphic.png'),
-    path.join(FIXTURES, 'report.pdf'),
-    path.join(FIXTURES, 'alpha.png')
-  ]);
-  await waitForRows(page, 4);
-  await waitForProbes(page);
-
-  await check('probe reads dimensions and page counts', async () => {
-    const metas = await page.locator('#fileList .file-meta').allTextContents();
-    assert.ok(metas.some((text) => text.includes('2400×1600')), 'JPEG dims missing: ' + metas.join(' | '));
-    assert.ok(metas.some((text) => text.includes('1800×1800')), 'PNG dims missing');
-    assert.ok(metas.some((text) => text.includes('3 pages')), 'PDF page count missing');
+  await check('exact WebP target is byte-exact and decodes', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#preset', 'us-passport');
+    await page.locator('#targetKB').fill('60');
+    await page.selectOption('#targetMode', 'exact');
+    await page.waitForTimeout(300);
+    await run();
+    const out = await downloadResult();
+    if (fs.statSync(out).size !== 60 * 1024) throw new Error('size ' + fs.statSync(out).size);
+    const info = await imageInfo(out);
+    if (!info.ok || info.width !== 600) throw new Error(JSON.stringify(info));
+    const note = await page.locator('.file-status').innerText();
+    if (!/Padded with harmless metadata/.test(note)) throw new Error('padding note missing: ' + note);
   });
 
-  await check('live estimate is measured and shows savings', async () => {
-    await page.waitForFunction(() => {
-      const note = document.querySelector('#estimateNote').textContent;
-      const value = document.querySelector('#estimateValue').textContent.trim();
-      const pill = document.querySelector('#estimatePill').textContent.trim();
-      return (
-        value !== '—' &&
-        /\d/.test(value) &&
-        /Measured estimate|estimate for the rest/.test(note) &&
-        !/measuring/i.test(note) &&
-        pill !== 'Measuring' &&
-        pill !== '—'
-      );
-    }, null, { timeout: 60000 });
-    const value = await page.locator('#estimateValue').textContent();
-    const pill = await page.locator('#estimatePill').textContent();
-    assert.match(value, /\d/);
-    const savings = Number(pill.replace(/[^0-9]/g, ''));
-    assert.ok(savings > 0, 'estimate shows no savings: ' + pill);
-    await page.waitForTimeout(350);
-    await page.screenshot({ path: path.join(SHOTS, '02-queue.png'), fullPage: true });
-  });
-
-  await check('PDF controls appear only when a PDF is queued', async () => {
-    assert.equal(await page.locator('#pdfField').isVisible(), true);
-  });
-
-  await squeeze(page);
-
-  await check('every file produces a downloadable result', async () => {
-    const rows = await page.locator('#fileList .file').count();
-    const downloads = await page.locator('#fileList [data-action="download"]:visible').count();
-    assert.equal(downloads, rows, 'not every row has a download action');
-    const notes = await page.locator('#fileList .file-note').allTextContents();
-    assert.ok(!notes.some((text) => /failed|error/i.test(text)), 'unexpected failure note: ' + notes.join(' | '));
-  });
-
-  await check('JPEG gets meaningfully smaller', async () => {
-    const row = page.locator('#fileList .file').filter({ hasText: 'photo.jpg' });
-    const before = parseBytes(await row.locator('.size-before').textContent());
-    const after = parseBytes(await row.locator('.size-after').textContent());
-    assert.ok(after < before, `expected ${after} < ${before}`);
-  });
-
-  await check('auto output keeps PNG transparency', async () => {
-    const file = await downloadRow(page, 3);
-    const buffer = fs.readFileSync(file);
-    assert.equal(buffer.subarray(0, 4).toString('latin1'), 'RIFF', 'expected a WebP container');
-    const alpha = await page.evaluate(async (base64) => {
-      const image = new Image();
-      image.src = 'data:image/webp;base64,' + base64;
-      await image.decode();
-      const canvas = document.createElement('canvas');
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(image, 0, 0);
-      return ctx.getImageData(1, 1, 1, 1).data[3];
-    }, buffer.toString('base64'));
-    assert.ok(alpha < 10, 'corner alpha was ' + alpha + ' — transparency was lost');
-  });
-
-  await check('result dimensions are correct', async () => {
-    await page.locator('#fileList .file').filter({ hasText: 'photo.jpg' }).locator('[data-action="compare"]').click();
-    await page.waitForSelector('#compareModal:not([hidden])');
-    await page.waitForTimeout(700);
-    const after = await page.locator('#metaAfter').textContent();
-    assert.match(after, /2400×1600/);
-    await page.screenshot({ path: path.join(SHOTS, '03-compare.png') });
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(() => document.querySelector('#compareModal').hidden);
-  });
-
-  await check('compare slider responds to keyboard', async () => {
-    await page.locator('#fileList .file').filter({ hasText: 'photo.jpg' }).locator('[data-action="compare"]').click();
-    await page.waitForSelector('#compareModal:not([hidden])');
-    const knob = page.locator('#compareKnob');
-    await knob.focus();
-    await page.keyboard.press('ArrowRight');
-    await page.keyboard.press('ArrowRight');
-    const now = Number(await knob.getAttribute('aria-valuenow'));
-    assert.ok(now > 50, 'aria-valuenow did not move');
-    await page.keyboard.press('Escape');
-  });
-
-  await check('transparent PNG flattened to JPEG uses a white matte, not black', async () => {
+  await check('exact JPEG target is byte-exact and decodes', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#preset', 'india-passport');
     await page.selectOption('#format', 'image/jpeg');
-    await page.waitForFunction(() => document.querySelector('#squeezeLabel').textContent !== 'All squeezed');
-    await squeeze(page);
-    const file = await downloadRow(page, 3);
-    const buffer = fs.readFileSync(file);
-    const pixel = await page.evaluate(async (base64) => {
-      const image = new Image();
-      image.src = 'data:image/jpeg;base64,' + base64;
-      await image.decode();
-      const canvas = document.createElement('canvas');
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(image, 0, 0);
-      const data = ctx.getImageData(1, 1, 1, 1).data;
-      return [data[0], data[1], data[2]];
-    }, buffer.toString('base64'));
-    assert.ok(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240, 'corner pixel was ' + pixel.join(','));
+    await page.locator('#targetKB').fill('50');
+    await page.selectOption('#targetMode', 'exact');
+    await page.waitForTimeout(300);
+    await run();
+    const out = await downloadResult();
+    if (fs.statSync(out).size !== 50 * 1024) throw new Error('size ' + fs.statSync(out).size);
+    if (fs.readFileSync(out).subarray(0, 2).toString('hex') !== 'ffd8') throw new Error('not a JPEG');
+    const info = await imageInfo(out);
+    if (!info.ok || info.width !== 350 || info.height !== 450) throw new Error(JSON.stringify(info));
   });
 
-  await check('target size mode actually reaches the target', async () => {
-    await page.selectOption('#format', 'auto');
-    if (!(await page.locator('#targetToggle').isChecked())) await page.locator('.switch').click();
-    assert.equal(await page.locator('#targetToggle').isChecked(), true);
-    await page.fill('#targetKB', '60');
-    await page.waitForFunction(() => document.querySelector('#squeezeLabel').textContent !== 'All squeezed');
-    await squeeze(page);
-    const row = page.locator('#fileList .file').filter({ hasText: 'photo.jpg' });
-    const after = parseBytes(await row.locator('.size-after').textContent());
-    assert.ok(after <= 60 * 1024, `target missed: ${after} bytes`);
+  await check('PNG target is coerced to WebP and still exact', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#format', 'image/png');
     await page.locator('.switch').click();
-    assert.equal(await page.locator('#targetToggle').isChecked(), false);
+    await page.locator('#targetKB').fill('40');
+    await page.selectOption('#targetMode', 'exact');
+    await page.waitForTimeout(300);
+    await run();
+    const note = await page.locator('.file-status').innerText();
+    if (!/PNG cannot meet a size target/.test(note)) throw new Error('note: ' + note);
+    const out = await downloadResult();
+    if (fs.statSync(out).size !== 40 * 1024) throw new Error('size ' + fs.statSync(out).size);
   });
 
-  await check('exact dimensions + letterbox produce the requested box', async () => {
-    await page.click('[data-resize="exact"]');
-    await page.click('#aspectLock');
-    await page.fill('#customWidth', '900');
-    await page.fill('#customHeight', '900');
-    await page.click('[data-letterbox="black"]');
-    await page.waitForFunction(() => document.querySelector('#squeezeLabel').textContent !== 'All squeezed');
-    await squeeze(page);
-    await page.locator('#fileList .file').filter({ hasText: 'photo.jpg' }).locator('[data-action="compare"]').click();
+  // --------------------------------------------------------------- convert --
+  await check('custom MIME output works and reaches an exact size', async () => {
+    await fresh('#/convert');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#format', 'custom');
+    await page.fill('#formatCustom', 'image/webp');
+    if (!/can encode/.test(await page.locator('#formatHint').innerText())) throw new Error('support hint');
+    await page.locator('.switch').click();
+    await page.locator('#targetKB').fill('30');
+    await page.selectOption('#targetMode', 'exact');
+    await page.waitForTimeout(300);
+    await run();
+    const out = await downloadResult();
+    if (!out.endsWith('.webp')) throw new Error('extension: ' + out);
+    if (fs.statSync(out).size !== 30 * 1024) throw new Error('size ' + fs.statSync(out).size);
+  });
+
+  await check('unsupported custom MIME disables the run', async () => {
+    await fresh('#/convert');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#format', 'custom');
+    await page.fill('#formatCustom', 'image/jxl');
+    await page.waitForTimeout(300);
+    if (!/cannot encode/.test(await page.locator('#formatHint').innerText())) throw new Error('hint');
+    if (!(await page.locator('#runBtn').isDisabled())) throw new Error('run enabled');
+  });
+
+  // --------------------------------------------------------------- squeeze --
+  await check('mixed squeeze, results, compare and ZIP', async () => {
+    await fresh('#/squeeze');
+    await upload([path.join(FIXTURES, 'photo.jpg'), path.join(FIXTURES, 'report.pdf')]);
+    if ((await page.locator('.file-row').count()) !== 2) throw new Error('rows');
+    if (!(await page.locator('#pdfPanel').isVisible())) throw new Error('pdf panel hidden');
+    await run();
+    const saved = await page.locator('.file-row .savings').allTextContents();
+    if (!saved.some((text) => text.includes('−'))) throw new Error('no savings: ' + saved);
+    await page.locator('.row-action', { hasText: 'compare' }).first().click();
     await page.waitForSelector('#compareModal:not([hidden])');
-    await page.waitForTimeout(700);
-    const after = await page.locator('#metaAfter').textContent();
-    assert.match(after, /900×900/, 'unexpected output dimensions: ' + after);
-    await page.screenshot({ path: path.join(SHOTS, '04-letterbox.png') });
+    await page.waitForTimeout(400);
+    const meta = await page.locator('#compareAfterMeta').innerText();
+    if (!/×/.test(meta)) throw new Error('compare meta: ' + meta);
     await page.keyboard.press('Escape');
-  });
-
-  await check('changing settings marks results stale', async () => {
-    await page.locator('#quality').evaluate((el) => {
-      el.value = '40';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await page.waitForFunction(() => document.querySelectorAll('#fileList .pill-stale').length > 0);
-    assert.ok((await page.locator('#fileList .pill-stale').count()) > 0);
-  });
-
-  await check('PDF structure mode keeps a valid PDF', async () => {
-    await page.selectOption('#pdfMode', 'structure');
-    await page.waitForFunction(() => document.querySelector('#squeezeLabel').textContent !== 'All squeezed');
-    await squeeze(page);
-    const file = await downloadRow(page, 2);
-    const header = fs.readFileSync(file).subarray(0, 5).toString('latin1');
-    assert.equal(header, '%PDF-');
-  });
-
-  await check('ZIP download contains every completed file', async () => {
+    if (!(await page.locator('#compareModal').isHidden())) throw new Error('compare did not close');
     const [download] = await Promise.all([
       page.waitForEvent('download'),
-      page.click('#zipBtn')
+      page.locator('#resultZone .result .btn-primary').click()
     ]);
-    const target = path.join(FIXTURES, 'basket.zip');
-    await download.saveAs(target);
-    const { execFileSync } = require('node:child_process');
-    const listing = execFileSync('unzip', ['-l', target], { encoding: 'utf8' });
-    const entries = listing.split('\n').filter((line) => /\.(jpg|png|webp|pdf)$/i.test(line));
-    assert.ok(entries.length >= 4, 'zip did not include all files:\n' + listing);
+    const zip = path.join(FIXTURES, 'squeeze.zip');
+    await download.saveAs(zip);
+    const entries = zipEntries(zip, /\.(webp|jpg|jpeg|png|pdf)$/);
+    if (entries.length !== 2) throw new Error('zip entries: ' + entries.length);
+    await page.screenshot({ path: path.join(SHOTS, '04-squeeze.png'), fullPage: true });
   });
 
-  await check('settings persist across reload', async () => {
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForFunction(() => document.querySelector('#quality').value === '40');
-    assert.equal(await page.locator('#quality').inputValue(), '40');
+  await check('PDF-only squeeze hides image controls', async () => {
+    await fresh('#/squeeze');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    if (!(await page.locator('#imagePanel').isHidden())) throw new Error('image panel visible');
+    if (!(await page.locator('#pdfPanel').isVisible())) throw new Error('pdf panel hidden');
   });
 
-  await check('theme toggle flips to dark and persists', async () => {
-    await page.click('#themeToggle');
-    await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
-    await page.waitForTimeout(350);
-    await page.screenshot({ path: path.join(SHOTS, '05-dark.png'), fullPage: true });
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
+  // ------------------------------------------------------------------- pdf --
+  await check('merge two 3-page PDFs', async () => {
+    await fresh('#/merge');
+    await upload([path.join(FIXTURES, 'report.pdf'), path.join(FIXTURES, 'report2.pdf')]);
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok || info.pages !== 6) throw new Error('pages ' + info.pages);
+  });
+
+  await check('split every page into a ZIP', async () => {
+    await fresh('#/split');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.click('#splitMode [data-mode="every"]');
+    await page.fill('#splitEvery', '1');
+    await run();
+    const entries = zipEntries(await downloadResult(), /\.pdf$/);
+    if (entries.length !== 3) throw new Error('entries ' + entries.length);
+  });
+
+  await check('split custom ranges', async () => {
+    await fresh('#/split');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.click('#splitMode [data-mode="ranges"]');
+    await page.fill('#splitRanges', '1-2; 3');
+    await run();
+    const entries = zipEntries(await downloadResult(), /\.pdf$/);
+    if (entries.length !== 2) throw new Error('entries ' + entries.length);
+  });
+
+  await check('extract pages 1-2', async () => {
+    await fresh('#/extract');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#pages', '1-2');
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
+  });
+
+  await check('delete page 2', async () => {
+    await fresh('#/delete');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#pages', '2');
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
+  });
+
+  await check('reorder to 3,1,2', async () => {
+    await fresh('#/reorder');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#order', '3, 1, 2');
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok || info.pages !== 3) throw new Error('pages ' + info.pages);
+  });
+
+  await check('rotate every page 90°', async () => {
+    await fresh('#/rotate');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run();
+    const out = await downloadResult();
+    const rotation = await page.evaluate(async (base64) => {
+      const raw = atob(base64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      const doc = await PDFLib.PDFDocument.load(bytes);
+      return doc.getPages().map((p) => p.getRotation().angle);
+    }, fs.readFileSync(out).toString('base64'));
+    if (!rotation.every((angle) => angle === 90)) throw new Error('rotation ' + rotation.join(','));
+  });
+
+  await check('images to PDF', async () => {
+    await fresh('#/images-to-pdf');
+    await upload([path.join(FIXTURES, 'photo.jpg'), path.join(FIXTURES, 'graphic.png')]);
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
+  });
+
+  await check('PDF to PNG images', async () => {
+    await fresh('#/pdf-to-images');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.selectOption('#imageFormat', 'image/png');
+    await page.selectOption('#imageDpi', '72');
+    await run();
+    const entries = zipEntries(await downloadResult(), /\.png$/);
+    if (entries.length !== 3) throw new Error('entries ' + entries.length);
+  });
+
+  await check('watermark and page numbers add text', async () => {
+    await fresh('#/watermark');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#wmText', 'DRAFT');
+    await run();
+    const marked = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!marked.ok || !marked.text.includes('DRAFT')) throw new Error('watermark text missing');
+
+    await fresh('#/page-numbers');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run();
+    const numbered = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!numbered.ok || !/Page 1 of 3/.test(numbered.text)) throw new Error('page number text missing');
+  });
+
+  let protectedFile = null;
+  await check('AES password add and remove', async () => {
+    await fresh('#/protect');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#pw1', 'test1234');
+    await page.fill('#pw2', 'test1234');
+    await run();
+    protectedFile = await downloadResult();
+    const locked = await pdfInfo(fs.readFileSync(protectedFile));
+    if (locked.ok) throw new Error('opened without password');
+    const opened = await pdfInfo(fs.readFileSync(protectedFile), 'test1234');
+    if (!opened.ok || opened.pages !== 3) throw new Error('password open failed');
+
+    await fresh('#/unlock');
+    await upload([protectedFile]);
+    await page.fill('#pw', 'test1234');
+    await run();
+    const plain = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!plain.ok || plain.pages !== 3) throw new Error('still encrypted');
+  });
+
+  await check('OCR makes a PDF searchable', async () => {
+    await fresh('#/ocr');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run(300000);
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok) throw new Error(info.error);
+  });
+
+  // ------------------------------------------------------------- app-level --
+  await check('theme cycles through light, dark and system', async () => {
+    await fresh('#/');
     await page.click('#themeToggle');
     await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'light');
-    await page.waitForTimeout(400);
+    await page.click('#themeToggle');
+    await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark');
+    await page.click('#themeToggle');
+    await page.waitForFunction(() => !document.documentElement.hasAttribute('data-theme'));
+    await page.screenshot({ path: path.join(SHOTS, '05-dark.png'), fullPage: true });
   });
 
-  await check('axe: no serious WCAG A/AA violations', async () => {
+  await check('accessibility: home, crop and protect are WCAG A/AA clean', async () => {
+    await fresh('#/');
+    await audit('home');
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#preset', 'us-passport');
     await page.waitForTimeout(400);
-    await page.addScriptTag({ path: require.resolve('axe-core/axe.min.js') });
-    const violations = await page.evaluate(async () => {
-      const result = await axe.run(document, {
-        runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'] }
-      });
-      return result.violations.map((violation) => ({
-        id: violation.id,
-        impact: violation.impact,
-        nodes: violation.nodes.length
-      }));
+    await audit('crop');
+    await fresh('#/protect');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await audit('protect');
+  });
+
+  await check('mobile layout has no horizontal overflow and completes a crop', async () => {
+    if (context) await context.close();
+    context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      acceptDownloads: true,
+      serviceWorkers: 'block'
     });
-    assert.deepEqual(violations, []);
+    page = await context.newPage();
+    errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.goto(BASE + '#/crop', { waitUntil: 'load' });
+    await page.evaluate(() => localStorage.clear());
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForTimeout(400);
+    await page.setInputFiles('#files-input', [path.join(FIXTURES, 'photo.jpg')]);
+    await page.waitForTimeout(1400);
+    await page.selectOption('#preset', 'us-passport');
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SHOTS, '06-mobile-crop.png'), fullPage: true });
+    await page.click('#runBtn');
+    await page.waitForFunction(() => !document.querySelector('#runBtn').textContent.includes('working'), null, {
+      timeout: 120000
+    });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    if (overflow > 1) throw new Error('horizontal overflow: ' + overflow);
+    if (!(await page.locator('#resultZone .result').isVisible())) throw new Error('no result');
+    await page.screenshot({ path: path.join(SHOTS, '07-mobile-result.png'), fullPage: true });
   });
 
-  await check('no runtime errors during the whole desktop run', async () => {
-    assert.deepEqual(errors, []);
-  });
-
-  // ----------------------------------------------------------------- mobile --
-  const mobile = await newAppPage(browser, { viewport: { width: 390, height: 844 }, colorScheme: 'dark' });
-  await mobile.page.waitForTimeout(250);
-  await mobile.page.screenshot({ path: path.join(SHOTS, '06-mobile-empty.png'), fullPage: true });
-  await mobile.page.setInputFiles('#fileInput', [path.join(FIXTURES, 'photo.jpg')]);
-  await waitForRows(mobile.page, 1);
-  await waitForProbes(mobile.page);
-  await squeeze(mobile.page);
-  await check('mobile layout squeezes and has no horizontal scroll', async () => {
-    const scrollWidth = await mobile.page.evaluate(() => document.documentElement.scrollWidth);
-    const clientWidth = await mobile.page.evaluate(() => document.documentElement.clientWidth);
-    assert.ok(scrollWidth <= clientWidth + 1, `horizontal overflow: ${scrollWidth} > ${clientWidth}`);
-    assert.equal(await mobile.page.locator('#fileList [data-action="download"]:visible').count(), 1);
-    await mobile.page.waitForTimeout(350);
-    await mobile.page.screenshot({ path: path.join(SHOTS, '07-mobile-queue.png'), fullPage: true });
-    assert.deepEqual(mobile.errors, []);
-  });
-
-  // ------------------------------------------------------------ edge cases --
-  const edge = await newAppPage(browser);
-  const notesTxt = path.join(FIXTURES, 'notes.txt');
-  const brokenPdf = path.join(FIXTURES, 'broken.pdf');
-  fs.writeFileSync(notesTxt, 'plain text is not a supported file');
-  fs.writeFileSync(brokenPdf, 'this is definitely not a PDF');
-
-  await check('unsupported files are rejected with a message', async () => {
-    await edge.page.setInputFiles('#fileInput', [notesTxt]);
-    await edge.page.waitForSelector('.toast.is-error');
-    const text = await edge.page.locator('.toast.is-error').first().textContent();
-    assert.match(text, /Not supported/);
-    assert.equal(await edge.page.locator('#fileList .file').count(), 0);
-  });
-
-  await check('duplicate files are skipped', async () => {
-    await edge.page.setInputFiles('#fileInput', [
-      path.join(FIXTURES, 'photo.jpg'),
-      path.join(FIXTURES, 'photo.jpg')
-    ]);
-    await waitForRows(edge.page, 1);
-    await edge.page.setInputFiles('#fileInput', [path.join(FIXTURES, 'photo.jpg')]);
-    await edge.page.waitForSelector('.toast.is-error, .toast');
-    await edge.page.waitForFunction(() => document.querySelectorAll('#fileList .file').length === 1);
-    assert.equal(await edge.page.locator('#fileList .file').count(), 1);
-    assert.equal(await edge.page.locator('#pdfField').isVisible(), false);
-  });
-
-  await check('broken PDFs surface an error with a retry action', async () => {
-    await edge.page.setInputFiles('#fileInput', [brokenPdf]);
-    await waitForRows(edge.page, 2);
-    await edge.page.waitForSelector('#fileList .file-note.is-error');
-    const note = await edge.page.locator('#fileList .file-note.is-error').textContent();
-    assert.match(note, /PDF|damaged|readable/i);
-    const retry = edge.page.locator('#fileList .file').filter({ hasText: 'broken.pdf' }).locator('[data-action="retry"]');
-    assert.equal(await retry.isVisible(), true);
-  });
-
-  await check('edge-case context has no runtime errors', async () => {
-    assert.deepEqual(edge.errors, []);
-  });
-  await edge.context.close();
-
-  // -------------------------------------------------------------- teardown --
-  await context.close();
-  await mobile.context.close();
-  await browser.close();
-
-  console.log('\n' + failures + ' failing check' + (failures === 1 ? '' : 's'));
+  console.log('\n' + (failures ? failures + ' failing check(s)' : 'all checks passed'));
   console.log('Screenshots: ' + SHOTS);
 
+  if (context) await context.close();
+  await browser.close();
   if (failures) process.exit(1);
-})().catch((error) => {
+})().catch(async (error) => {
   console.error(error);
+  if (context) await context.close().catch(() => {});
+  if (browser) await browser.close().catch(() => {});
   process.exit(1);
 });

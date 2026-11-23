@@ -196,7 +196,8 @@
       );
       var mime = C.resolveOutputMime(options.format, meta.mimeType, {
         hasAlpha: meta.hasAlpha,
-        caps: caps
+        caps: caps,
+        customMime: options.customMime
       });
       if (options.targetEnabled && mime === 'image/png') {
         mime = caps.webp ? 'image/webp' : 'image/jpeg';
@@ -212,8 +213,12 @@
       var ctx = canvas.getContext('2d');
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'medium';
-      if (mime === 'image/jpeg') {
-        ctx.fillStyle = options.letterbox === 'black' ? '#000000' : '#ffffff';
+      var background = options.background || options.letterbox || 'white';
+      var fillColor = mime === 'image/jpeg'
+        ? (background === 'black' ? '#000000' : '#ffffff')
+        : (background === 'transparent' ? null : background === 'black' ? '#000000' : '#ffffff');
+      if (fillColor) {
+        ctx.fillStyle = fillColor;
         ctx.fillRect(0, 0, sw, sh);
       }
       ctx.drawImage(sample, 0, 0, sw, sh);
@@ -229,14 +234,16 @@
       var bytes = C.estimateFromSample(blob.size, sw * sh, dims.width * dims.height);
       if (options.targetEnabled) {
         var target = C.kbToBytes(options.targetKB);
-        if (target > 0) bytes = Math.min(bytes, Math.round(target * 0.98));
+        if (target > 0) {
+          bytes = options.targetMode === 'exact' ? target : Math.min(bytes, Math.round(target * 0.98));
+        }
       }
       return { bytes: bytes, mimeType: mime, width: dims.width, height: dims.height };
     }
 
     estimatePdf(file, options, meta) {
       if (options.pdfMode === 'structure') {
-        return Math.max(1024, Math.round(file.size * 0.94));
+        return Math.max(1024, Math.round(file.size * 0.98));
       }
       var pages = meta && meta.pages ? meta.pages : 1;
       var dpi = Core().clampNumber(options.pdfDpi, 72, 300);
@@ -272,7 +279,8 @@
       if (!prepared) prepared = await this.convertHeic(file);
       var result = await this.compressImage(prepared, options, onProgress, {
         originalName: (meta && meta.originalName) || file.name,
-        mimeType: 'image/jpeg'
+        mimeType: 'image/jpeg',
+        prepared: true
       });
       result.convertedFrom = 'HEIC';
       result.note = [result.note, 'Converted from HEIC.'].filter(Boolean).join(' ');
@@ -298,9 +306,11 @@
         var dims = C.capCanvasDims(requested.width, requested.height, C.MAX_PIXELS, C.MAX_EDGE);
         if (dims.scaled) notes.push('Resized to ' + dims.width + '×' + dims.height + ' to stay within browser canvas limits.');
 
-        var mime = C.resolveOutputMime(options.format, file.type || (meta && meta.mimeType), {
+        var inputMime = (meta && meta.mimeType) || file.type || 'image/jpeg';
+        var mime = C.resolveOutputMime(options.format, inputMime, {
           hasAlpha: hasAlpha,
-          caps: caps
+          caps: caps,
+          customMime: options.customMime
         });
 
         var targetBytes = options.targetEnabled ? C.kbToBytes(options.targetKB) : 0;
@@ -310,16 +320,28 @@
           notes.push('PNG cannot meet a size target losslessly — encoded as ' + (mime === 'image/webp' ? 'WebP' : 'JPEG') + '.');
         }
 
+        var background = options.background || options.letterbox || 'white';
         var flatten = mime === 'image/jpeg';
-        var matte = options.letterbox === 'black' ? '#000000' : '#ffffff';
+        var matte = flatten
+          ? (background === 'black' ? '#000000' : '#ffffff')
+          : (background === 'transparent' ? null : background === 'black' ? '#000000' : '#ffffff');
 
         onProgress(16, 'Rendering pixels');
-        var rect = C.fitRect(srcW, srcH, dims.width, dims.height);
-        var fillBackground = flatten || !rect.covers;
-        canvas = this.renderCanvas(drawable.source, srcW, srcH, dims.width, dims.height, fillBackground ? matte : null);
+        var geom = C.computeCropRect(srcW, srcH, dims.width, dims.height, options.fitMode, options.anchor);
+        canvas = this.renderCanvas(drawable.source, srcW, srcH, dims.width, dims.height, {
+          fitMode: options.fitMode,
+          anchor: options.anchor,
+          background: matte
+        });
 
-        if (!rect.covers) notes.push('Fitted inside ' + dims.width + '×' + dims.height + ' with a ' + options.letterbox + ' border.');
-        if (flatten && hasAlpha) notes.push('Transparency flattened onto ' + options.letterbox + '.');
+        if (options.fitMode === 'fill' && !C.ratiosClose(srcW, srcH, dims.width, dims.height, 0.005)) {
+          notes.push('Cropped to fill ' + dims.width + '×' + dims.height + ' (' + (options.anchor || 'center') + ').');
+        } else if (!geom.covers) {
+          notes.push('Fitted inside ' + dims.width + '×' + dims.height + ' on a ' + background + ' background.');
+        }
+        if (flatten && hasAlpha) {
+          notes.push('Transparency flattened onto ' + (background === 'black' ? 'black' : 'white') + '.');
+        }
         if (file.type === 'image/gif') notes.push('Animated GIFs are flattened to a single frame.');
         if (file.type === 'image/svg+xml') notes.push('SVG artwork is rasterised to pixels.');
 
@@ -341,9 +363,30 @@
             notes.push('Downscaled to ' + match.width + '×' + match.height + ' to reach the target size.');
             canvas = match.canvas || canvas;
           }
-          if (match.missed) notes.push('Could not reach ' + C.formatBytes(targetBytes) + ' without destroying the image — closest match kept.');
+          if (match.missed) {
+            notes.push('Could not reach ' + C.formatBytes(targetBytes) + ' without destroying the image — closest match kept.');
+          }
         } else {
           blob = await this.canvasToBlob(canvas, mime, quality);
+        }
+
+        // Custom MIME: browsers silently fall back to PNG for types they cannot encode.
+        if (options.format === 'custom') {
+          if (!blob || blob.type !== mime) {
+            throw new Error('This browser cannot encode ' + mime + '. Pick WebP or JPEG instead.');
+          }
+        }
+
+        var paddedBytes = 0;
+        if (targetBytes && options.targetMode === 'exact' && !targetMissed && blob.size < targetBytes) {
+          var original = new Uint8Array(await blob.arrayBuffer());
+          var padded = window.OptiPadding.padBytes(original, mime, targetBytes);
+          if (padded.bytes.length === targetBytes) {
+            paddedBytes = targetBytes - original.length;
+            blob = new Blob([padded.bytes], { type: mime });
+            notes.push('Padded with harmless metadata to hit ' + C.formatBytes(targetBytes) + ' exactly.');
+            if (!padded.supported) notes.push('Padding uses trailing bytes; strict validators may object.');
+          }
         }
 
         var resized = finalWidth !== srcW || finalHeight !== srcH;
@@ -367,11 +410,15 @@
           width: finalWidth,
           height: finalHeight,
           qualityUsed: qualityUsed,
-          letterboxed: !rect.covers,
-          letterboxColor: !rect.covers ? options.letterbox : null,
+          letterboxed: !geom.covers && options.fitMode !== 'fill',
+          letterboxColor: !geom.covers ? background : null,
+          cropped: options.fitMode === 'fill' && !C.ratiosClose(srcW, srcH, dims.width, dims.height, 0.005),
           usedOriginal: usedOriginal,
           targetBytes: targetBytes || null,
           targetMissed: targetMissed,
+          targetMode: options.targetMode,
+          paddedBytes: paddedBytes,
+          exactSize: targetBytes ? outBlob.size === targetBytes : false,
           note: notes.join(' ')
         };
       } finally {
@@ -659,8 +706,9 @@
       return loadViaImageElement(source);
     }
 
-    renderCanvas(source, srcW, srcH, dstW, dstH, background) {
+    renderCanvas(source, srcW, srcH, dstW, dstH, options) {
       var C = Core();
+      var opts = options || {};
       var canvas = document.createElement('canvas');
       canvas.width = dstW;
       canvas.height = dstH;
@@ -668,18 +716,31 @@
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
 
-      if (background) {
-        ctx.fillStyle = background;
+      if (opts.background) {
+        ctx.fillStyle = opts.background;
         ctx.fillRect(0, 0, dstW, dstH);
       }
 
-      var rect = C.fitRect(srcW, srcH, dstW, dstH);
-      var prepared = this.downscaleSource(source, srcW, srcH, rect.width, rect.height);
-      var dx = rect.covers ? 0 : rect.x;
-      var dy = rect.covers ? 0 : rect.y;
-      var dw = rect.covers ? dstW : rect.width;
-      var dh = rect.covers ? dstH : rect.height;
-      ctx.drawImage(prepared.source, 0, 0, prepared.width, prepared.height, dx, dy, dw, dh);
+      var geom = C.computeCropRect(srcW, srcH, dstW, dstH, opts.fitMode, opts.anchor);
+      if (geom.mode === 'fill') {
+        var tempW = Math.min(Math.round(geom.sWidth), Math.max(1, dstW * 2));
+        var tempH = Math.min(Math.round(geom.sHeight), Math.max(1, dstH * 2));
+        var scale = Math.min(tempW / geom.sWidth, tempH / geom.sHeight);
+        var crop = document.createElement('canvas');
+        crop.width = Math.max(1, Math.round(geom.sWidth * scale));
+        crop.height = Math.max(1, Math.round(geom.sHeight * scale));
+        var cropCtx = crop.getContext('2d');
+        cropCtx.imageSmoothingEnabled = true;
+        cropCtx.imageSmoothingQuality = 'high';
+        cropCtx.drawImage(source, geom.sx, geom.sy, geom.sWidth, geom.sHeight, 0, 0, crop.width, crop.height);
+        ctx.drawImage(crop, 0, 0, crop.width, crop.height, 0, 0, dstW, dstH);
+        crop.width = 0;
+        crop.height = 0;
+        return canvas;
+      }
+
+      var prepared = this.downscaleSource(source, srcW, srcH, geom.dWidth, geom.dHeight);
+      ctx.drawImage(prepared.source, 0, 0, prepared.width, prepared.height, geom.dx, geom.dy, geom.dWidth, geom.dHeight);
       if (prepared.dispose) prepared.dispose();
       return canvas;
     }
@@ -796,6 +857,46 @@
           reject(err);
         }
       });
+    }
+
+    supportsType(mime) {
+      if (!mime || mime === 'auto' || mime === 'original') return true;
+      var cache = this._typeSupport || (this._typeSupport = {});
+      if (cache[mime] !== undefined) return cache[mime];
+      var ok = false;
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = 2;
+        canvas.height = 2;
+        canvas.getContext('2d').fillRect(0, 0, 2, 2);
+        ok = canvas.toDataURL(mime).indexOf('data:' + mime) === 0;
+      } catch (err) {
+        ok = false;
+      }
+      cache[mime] = ok;
+      return ok;
+    }
+
+    async prepareForPdf(file, options) {
+      var C = Core();
+      var opts = options || {};
+      var drawable = await this.loadDrawable(file);
+      try {
+        var dims = C.capCanvasDims(drawable.width, drawable.height, 16 * 1000 * 1000, 5000);
+        var hasAlpha = await this.detectAlpha(drawable.source);
+        var mime = hasAlpha ? 'image/png' : 'image/jpeg';
+        var canvas = this.renderCanvas(drawable.source, drawable.width, drawable.height, dims.width, dims.height, {
+          fitMode: 'fit',
+          anchor: 'center',
+          background: hasAlpha ? null : '#ffffff'
+        });
+        var blob = await this.canvasToBlob(canvas, mime, hasAlpha ? undefined : 0.9);
+        canvas.width = 0;
+        canvas.height = 0;
+        return { blob: blob, mimeType: mime, width: dims.width, height: dims.height };
+      } finally {
+        drawable.close();
+      }
     }
 
     async convertHeic(file) {

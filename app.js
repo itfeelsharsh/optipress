@@ -1,137 +1,140 @@
 /**
  * OptiPress · app.js
- * UI controller. Keeps DOM updates incremental so progress never flickers.
+ * Hash-routed local file tools: images and PDFs, no uploads.
  */
 (function () {
   'use strict';
 
   var C = window.OptiCore;
-  var engine = window.optiPressEngine;
+  var E = window.optiPressEngine;
+  var P = window.OptiPdf;
+  var Presets = window.OptiPresets;
 
-  var LIMITS = {
-    maxFiles: 80,
-    maxFileBytes: 200 * 1024 * 1024
+  var main = document.getElementById('main');
+  var themeButton = document.getElementById('themeToggle');
+  var toasts = document.getElementById('toasts');
+  var live = document.getElementById('liveStatus');
+  var dropOverlay = document.getElementById('dropOverlay');
+
+  var STORAGE = { settings: 'optipress:settings:v3', theme: 'optipress:theme:v2' };
+  var LIMITS = { files: 80, bytes: 200 * 1024 * 1024 };
+
+  var APP_DEFAULTS = {
+    quality: 78,
+    format: 'auto',
+    customMime: '',
+    targetEnabled: false,
+    targetMode: 'exact',
+    targetKB: 500,
+    scale: 100,
+    fitMode: 'fit',
+    anchor: 'center',
+    background: 'white',
+    presetId: 'custom',
+    cropWidth: '',
+    cropHeight: '',
+    pdfMode: 'raster',
+    pdfDpi: 150,
+    pageSize: 'a4',
+    margin: 24,
+    orientation: 'auto',
+    imageDpi: 150,
+    imageFormat: 'image/jpeg',
+    watermarkText: 'DRAFT',
+    watermarkSize: 9,
+    watermarkOpacity: 15,
+    watermarkAngle: 45,
+    watermarkColor: '#666666',
+    numberPosition: 'bottom-center',
+    numberFormat: 'Page {n} of {total}',
+    numberStart: 1,
+    numberSize: 10,
+    ocrDpi: 200
   };
 
-  var STORAGE = {
-    settings: 'optipress:settings:v2',
-    theme: 'optipress:theme'
-  };
-
-  var state = {
-    items: [],
-    settings: null,
-    estimates: new Map(),
-    estimateToken: 0,
-    estimateCache: new Map(),
-    estimateTimer: null,
-    busy: false,
-    estimating: false,
-    idSeq: 0,
-    lockRatio: null,
-    dragDepth: 0,
+  var app = {
     theme: null,
-    compare: { item: null, urls: [], lastFocus: null, dragging: false },
-    installPrompt: null
+    settings: null,
+    pendingFiles: null,
+    dropHandler: null,
+    busy: false,
+    installPrompt: null,
+    estimateCache: new Map()
   };
 
-  var els = {};
+  var cleanups = [];
+  var saveTimer = null;
 
   // ------------------------------------------------------------------ boot --
 
   document.addEventListener('DOMContentLoaded', init);
 
   function init() {
-    cacheElements();
-    if (!C || !engine) {
-      document.body.insertAdjacentHTML(
-        'afterbegin',
-        '<p class="noscript">OptiPress could not start: a script failed to load. Reload the page.</p>'
-      );
-      return;
+    app.settings = normalizeAppSettings(readJSON(STORAGE.settings));
+    if (app.settings.format === 'custom' && (!app.settings.customMime || !E.supportsType(app.settings.customMime))) {
+      app.settings.format = 'auto';
     }
-
-    state.settings = C.normalizeSettings(readStoredSettings());
-    state.theme = readTheme();
-    state.lockRatio = null;
-
+    app.theme = readTheme();
     applyTheme();
-    syncFormatSupport();
-    applySettingsToUi();
-    bindEvents();
-    syncFieldVisibility();
-    syncActions();
-    updateSummary();
-    updateProtocolHint();
+    bindChrome();
+    bindCompare();
+    bindGlobalDrop();
+    bindPaste();
     registerServiceWorker();
-
-    if (typeof window.matchMedia === 'function') {
-      var mq = window.matchMedia('(prefers-color-scheme: dark)');
-      var onChange = function () {
-        if (!state.theme) applyTheme();
-      };
-      if (mq.addEventListener) mq.addEventListener('change', onChange);
-      else if (mq.addListener) mq.addListener(onChange);
-    }
-  }
-
-  function cacheElements() {
-    var ids = [
-      'dropzone', 'fileInput', 'queue', 'fileList', 'queueCount', 'queueSummary',
-      'addBtn', 'clearBtn', 'squeezeBtn', 'squeezeLabel', 'zipBtn', 'zipLabel',
-      'presetGroup', 'presetHint', 'quality', 'qualityOut', 'qualityField',
-      'resizeGroup', 'resizeOut', 'resizeField', 'scale', 'scaleControls', 'exactControls',
-      'customWidth', 'customHeight', 'aspectLock', 'letterboxGroup', 'exactHint',
-      'format', 'formatHint', 'formatField', 'avifOption',
-      'pdfField', 'pdfMode', 'pdfDpi', 'pdfDpiRow', 'pdfHint',
-      'targetField', 'targetToggle', 'targetControls', 'targetKB', 'targetHint',
-      'resetBtn', 'summary', 'estimatePill', 'estimateValue', 'estimateMeter', 'estimateNote',
-      'themeToggle', 'installBtn', 'workspace', 'valueStrip',
-      'compareModal', 'compareArea', 'compareBeforeLayer', 'compareBefore', 'compareAfter',
-      'compareDivider', 'compareKnob', 'compareFile', 'metaBefore', 'metaAfter', 'metaSaved',
-      'closeModalBtn', 'dropOverlay', 'toasts', 'liveStatus', 'protocolHint',
-      'settingsForm'
-    ];
-    ids.forEach(function (id) {
-      els[id] = document.getElementById(id);
+    window.addEventListener('hashchange', route);
+    document.addEventListener('keydown', function (event) {
+      if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return;
+      var button = document.getElementById('runBtn');
+      if (button && !button.disabled) {
+        event.preventDefault();
+        button.click();
+      }
     });
+    window.addEventListener('beforeinstallprompt', function (event) {
+      event.preventDefault();
+      app.installPrompt = event;
+    });
+    route();
   }
 
-  // --------------------------------------------------------------- storage --
+  function onCleanup(fn) {
+    cleanups.push(fn);
+  }
 
-  function safeGet(key) {
+  function cleanupView() {
+    cleanups.forEach(function (fn) {
+      try {
+        fn();
+      } catch (err) {
+        /* noop */
+      }
+    });
+    cleanups = [];
+    app.dropHandler = null;
+    app.estimateCache.clear();
+    closeCompare(true);
+  }
+
+  function route() {
+    if (app.busy) return;
+    cleanupView();
+    var hash = location.hash.replace(/^#\/?/, '').split('?')[0];
+    if (hash === 'about') {
+      renderAbout();
+    } else if (hash && TOOLS[hash]) {
+      renderTool(TOOLS[hash]);
+    } else {
+      renderHome();
+    }
+    window.scrollTo(0, 0);
     try {
-      return window.localStorage.getItem(key);
+      main.focus({ preventScroll: true });
     } catch (err) {
-      return null;
+      main.focus();
     }
   }
 
-  function safeSet(key, value) {
-    try {
-      window.localStorage.setItem(key, value);
-    } catch (err) {
-      /* private mode: settings simply won't persist */
-    }
-  }
-
-  function readStoredSettings() {
-    var raw = safeGet(STORAGE.settings);
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw);
-    } catch (err) {
-      return null;
-    }
-  }
-
-  var saveTimer = null;
-  function saveSettings() {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(function () {
-      safeSet(STORAGE.settings, JSON.stringify(state.settings));
-    }, 220);
-  }
+  // ----------------------------------------------------------------- theme --
 
   function readTheme() {
     var value = safeGet(STORAGE.theme);
@@ -139,543 +142,312 @@
   }
 
   function effectiveTheme() {
-    if (state.theme) return state.theme;
+    if (app.theme) return app.theme;
     return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
   function applyTheme() {
     var root = document.documentElement;
-    if (state.theme) root.setAttribute('data-theme', state.theme);
+    if (app.theme) root.setAttribute('data-theme', app.theme);
     else root.removeAttribute('data-theme');
-
-    var dark = effectiveTheme() === 'dark';
-    if (els.themeToggle) {
-      els.themeToggle.setAttribute('aria-pressed', String(dark));
-      els.themeToggle.setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+    var label = app.theme || 'system';
+    if (themeButton) {
+      themeButton.textContent = 'theme: ' + label;
+      themeButton.setAttribute('aria-label', 'Theme: ' + label + '. Click to change.');
+      themeButton.setAttribute('aria-pressed', app.theme ? 'true' : 'false');
     }
-    var meta = document.querySelector('meta[name="theme-color"]:not([media])');
-    if (meta) meta.setAttribute('content', dark ? '#14120d' : '#faf7f0');
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', effectiveTheme() === 'dark' ? '#12151c' : '#f4f1ea');
   }
 
-  // ---------------------------------------------------------------- events --
-
-  function bindEvents() {
-    els.dropzone.addEventListener('click', openPicker);
-    els.addBtn.addEventListener('click', openPicker);
-    els.fileInput.addEventListener('change', function () {
-      if (els.fileInput.files && els.fileInput.files.length) {
-        addFiles(els.fileInput.files, 'picked');
-        els.fileInput.value = '';
-      }
-    });
-
-    els.clearBtn.addEventListener('click', clearQueue);
-    els.squeezeBtn.addEventListener('click', function () {
-      squeezeAll();
-    });
-    els.zipBtn.addEventListener('click', downloadZip);
-    els.resetBtn.addEventListener('click', resetSettings);
-    els.themeToggle.addEventListener('click', toggleTheme);
-
-    initRadioGroup(els.presetGroup, selectPreset);
-    initRadioGroup(els.resizeGroup, selectResizeMode);
-    initRadioGroup(els.letterboxGroup, function (btn) {
-      commitSettings({ letterbox: btn.dataset.letterbox });
-    });
-
-    els.quality.addEventListener('input', function () {
-      commitSettings({ quality: Number(els.quality.value), preset: 'custom' });
-    });
-
-    els.scale.addEventListener('input', function () {
-      commitSettings({ scale: Number(els.scale.value), preset: 'custom' });
-    });
-
-    els.customWidth.addEventListener('input', function () {
-      var width = C.toPositiveInt(els.customWidth.value);
-      var patch = { customWidth: els.customWidth.value, preset: 'custom' };
-      if (state.settings.aspectLocked && width && state.lockRatio) {
-        var height = Math.max(1, Math.round(width / state.lockRatio));
-        patch.customHeight = height;
-        els.customHeight.value = String(height);
-      }
-      commitSettings(patch, { syncInputs: false });
-    });
-
-    els.customHeight.addEventListener('input', function () {
-      var height = C.toPositiveInt(els.customHeight.value);
-      var patch = { customHeight: els.customHeight.value, preset: 'custom' };
-      if (state.settings.aspectLocked && height && state.lockRatio) {
-        var width = Math.max(1, Math.round(height * state.lockRatio));
-        patch.customWidth = width;
-        els.customWidth.value = String(width);
-      }
-      commitSettings(patch, { syncInputs: false });
-    });
-
-    els.aspectLock.addEventListener('click', function () {
-      var next = !state.settings.aspectLocked;
-      if (next) {
-        var w = C.toPositiveInt(els.customWidth.value);
-        var h = C.toPositiveInt(els.customHeight.value);
-        if (w && h) state.lockRatio = w / h;
-        else if (!state.lockRatio) state.lockRatio = firstImageRatio() || 1;
-      }
-      commitSettings({ aspectLocked: next });
-      if (next) {
-        var width = C.toPositiveInt(els.customWidth.value);
-        if (width && state.lockRatio) {
-          var height = Math.max(1, Math.round(width / state.lockRatio));
-          els.customHeight.value = String(height);
-          commitSettings({ customHeight: height }, { syncInputs: false });
-        }
-      }
-    });
-
-    els.format.addEventListener('change', function () {
-      commitSettings({ format: els.format.value });
-    });
-
-    els.pdfMode.addEventListener('change', function () {
-      commitSettings({ pdfMode: els.pdfMode.value });
-    });
-
-    els.pdfDpi.addEventListener('change', function () {
-      commitSettings({ pdfDpi: Number(els.pdfDpi.value) });
-    });
-
-    els.targetToggle.addEventListener('change', function () {
-      commitSettings({ targetEnabled: els.targetToggle.checked });
-    });
-
-    els.targetKB.addEventListener('input', function () {
-      commitSettings({ targetKB: els.targetKB.value });
-    });
-
-    els.fileList.addEventListener('click', function (event) {
-      var button = event.target.closest('[data-action]');
-      if (!button) return;
-      var row = button.closest('.file');
-      if (!row) return;
-      handleRowAction(button.dataset.action, row.dataset.id);
-    });
-
-    bindDragAndDrop();
-    bindPaste();
-    bindCompareModal();
-
-    // A stray Enter inside the settings form must never reload and drop the queue.
-    els.settingsForm.addEventListener('submit', function (event) {
-      event.preventDefault();
-    });
-
-    document.addEventListener('keydown', function (event) {
-      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-        if (!els.compareModal.hidden) return;
-        event.preventDefault();
-        squeezeAll();
-      }
-    });
-
-    els.installBtn.addEventListener('click', promptInstall);
-    window.addEventListener('beforeinstallprompt', function (event) {
-      event.preventDefault();
-      state.installPrompt = event;
-      els.installBtn.hidden = false;
-    });
-    window.addEventListener('appinstalled', function () {
-      state.installPrompt = null;
-      els.installBtn.hidden = true;
-      toast('OptiPress installed.', 'ok');
-    });
+  function cycleTheme() {
+    app.theme = app.theme === null ? 'light' : app.theme === 'light' ? 'dark' : null;
+    if (app.theme) safeSet(STORAGE.theme, app.theme);
+    else safelyRemove(STORAGE.theme);
+    applyTheme();
   }
 
-  function openPicker() {
-    els.fileInput.click();
-  }
-
-  function selectPreset(btn) {
-    var values = C.presetSettings(btn.dataset.preset);
-    if (!values) return;
-    commitSettings({
-      preset: btn.dataset.preset,
-      quality: values.quality,
-      scale: values.scale,
-      resizeMode: 'scale'
-    });
-  }
-
-  function selectResizeMode(btn) {
-    var mode = btn.dataset.resize;
-    commitSettings({ resizeMode: mode });
-    if (mode === 'exact') seedExactDims();
-  }
-
-  function initRadioGroup(container, onSelect) {
-    var buttons = Array.prototype.slice.call(container.querySelectorAll('[role="radio"]'));
-    container.addEventListener('click', function (event) {
-      var button = event.target.closest('[role="radio"]');
-      if (!button || !container.contains(button)) return;
-      onSelect(button);
-    });
-    container.addEventListener('keydown', function (event) {
-      var current = event.target.closest('[role="radio"]');
-      if (!current) return;
-      var index = buttons.indexOf(current);
-      var next = -1;
-      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % buttons.length;
-      else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + buttons.length) % buttons.length;
-      else if (event.key === 'Home') next = 0;
-      else if (event.key === 'End') next = buttons.length - 1;
-      if (next < 0) return;
-      event.preventDefault();
-      buttons[next].focus();
-      buttons[next].click();
-    });
-  }
-
-  function setRadio(container, key, value) {
-    container.querySelectorAll('[role="radio"]').forEach(function (button) {
-      var active = button.dataset[key] === value;
-      button.setAttribute('aria-checked', String(active));
-      button.tabIndex = active ? 0 : -1;
-    });
+  function bindChrome() {
+    if (themeButton) themeButton.addEventListener('click', cycleTheme);
+    if (window.matchMedia) {
+      var mq = window.matchMedia('(prefers-color-scheme: dark)');
+      var listener = function () {
+        if (!app.theme) applyTheme();
+      };
+      if (mq.addEventListener) mq.addEventListener('change', listener);
+      else if (mq.addListener) mq.addListener(listener);
+    }
   }
 
   // -------------------------------------------------------------- settings --
 
-  function commitSettings(patch, options) {
-    var opts = options || {};
-    state.settings = C.normalizeSettings(Object.assign({}, state.settings, patch));
-    applySettingsToUi({ syncInputs: opts.syncInputs !== false });
-    saveSettings();
-    markResultsStale();
-    syncFieldVisibility();
-    updateExactHint();
-    scheduleEstimate();
-    syncActions();
-  }
+  function normalizeAppSettings(raw) {
+    var input = raw && typeof raw === 'object' ? raw : {};
+    var base = C.normalizeSettings(input, C.DEFAULTS);
+    var s = Object.assign({}, APP_DEFAULTS, {
+      quality: base.quality,
+      format: base.format,
+      customMime: base.customMime,
+      targetEnabled: base.targetEnabled,
+      targetMode: base.targetMode,
+      targetKB: base.targetKB,
+      scale: base.scale,
+      fitMode: base.fitMode,
+      anchor: base.anchor,
+      background: base.background,
+      pdfMode: base.pdfMode,
+      pdfDpi: base.pdfDpi
+    });
 
-  function applySettingsToUi(options) {
-    var opts = options || {};
-    var s = state.settings;
-
-    els.quality.value = String(s.quality);
-    els.qualityOut.textContent = String(s.quality);
-    els.scale.value = String(s.scale);
-
-    setRadio(els.presetGroup, 'preset', s.preset);
-    els.presetHint.textContent = s.preset === 'custom'
-      ? 'Custom mix. Presets are just shortcuts — every control stays editable.'
-      : C.PRESETS[s.preset].hint;
-
-    setRadio(els.resizeGroup, 'resize', s.resizeMode);
-    els.scaleControls.hidden = s.resizeMode !== 'scale';
-    els.exactControls.hidden = s.resizeMode !== 'exact';
-    setRadio(els.letterboxGroup, 'letterbox', s.letterbox);
-
-    if (opts.syncInputs !== false) {
-      if (document.activeElement !== els.customWidth) els.customWidth.value = s.customWidth ? String(s.customWidth) : '';
-      if (document.activeElement !== els.customHeight) els.customHeight.value = s.customHeight ? String(s.customHeight) : '';
+    s.presetId = typeof input.presetId === 'string' ? input.presetId : 'custom';
+    s.cropWidth = C.toPositiveInt(input.cropWidth) || '';
+    s.cropHeight = C.toPositiveInt(input.cropHeight) || '';
+    s.pageSize = ['a4', 'letter', 'auto'].indexOf(input.pageSize) !== -1 ? input.pageSize : 'a4';
+    s.margin = Math.round(C.clampNumber(input.margin === undefined ? 24 : input.margin, 0, 72));
+    s.orientation = ['auto', 'portrait', 'landscape'].indexOf(input.orientation) !== -1 ? input.orientation : 'auto';
+    s.imageDpi = [72, 150, 200, 300].indexOf(Number(input.imageDpi)) !== -1 ? Number(input.imageDpi) : 150;
+    s.imageFormat = ['image/jpeg', 'image/png'].indexOf(input.imageFormat) !== -1 ? input.imageFormat : 'image/jpeg';
+    s.watermarkText = String(input.watermarkText || 'DRAFT').slice(0, 80);
+    s.watermarkSize = Math.round(C.clampNumber(input.watermarkSize === undefined ? 9 : input.watermarkSize, 2, 40));
+    s.watermarkOpacity = Math.round(C.clampNumber(input.watermarkOpacity === undefined ? 15 : input.watermarkOpacity, 2, 100));
+    s.watermarkAngle = Number(input.watermarkAngle) === 0 ? 0 : 45;
+    s.watermarkColor = /^#[0-9a-f]{6}$/i.test(String(input.watermarkColor || '')) ? input.watermarkColor : '#666666';
+    s.numberPosition = ['bottom-center', 'bottom-right', 'top-center', 'top-right'].indexOf(input.numberPosition) !== -1
+      ? input.numberPosition
+      : 'bottom-center';
+    s.numberFormat = ['Page {n} of {total}', '{n}', '{n} / {total}'].indexOf(input.numberFormat) !== -1
+      ? input.numberFormat
+      : 'Page {n} of {total}';
+    s.numberStart = Math.max(1, Math.round(Number(input.numberStart) || 1));
+    s.numberSize = Math.round(C.clampNumber(input.numberSize === undefined ? 10 : input.numberSize, 6, 36));
+    s.ocrDpi = [150, 200, 300].indexOf(Number(input.ocrDpi)) !== -1 ? Number(input.ocrDpi) : 200;
+    if (window.optiPressEngine) {
+      if (s.format === 'image/avif' && !window.optiPressEngine.supportsType('image/avif')) s.format = 'auto';
+      if (s.format === 'image/webp' && !window.optiPressEngine.supportsType('image/webp')) s.format = 'auto';
     }
-
-    els.aspectLock.classList.toggle('is-active', s.aspectLocked);
-    els.aspectLock.setAttribute('aria-pressed', String(s.aspectLocked));
-    els.aspectLock.setAttribute('aria-label', s.aspectLocked ? 'Aspect ratio locked' : 'Aspect ratio unlocked');
-    els.aspectLock.title = s.aspectLocked ? 'Aspect ratio locked' : 'Aspect ratio unlocked';
-
-    els.resizeOut.textContent = s.resizeMode === 'scale'
-      ? s.scale + '%'
-      : s.customWidth && s.customHeight
-        ? s.customWidth + '×' + s.customHeight
-        : 'auto';
-
-    els.format.value = s.format;
-    els.pdfMode.value = s.pdfMode;
-    els.pdfDpi.value = String(s.pdfDpi);
-    els.pdfDpiRow.hidden = s.pdfMode === 'structure';
-    els.pdfHint.textContent = s.pdfMode === 'structure'
-      ? 'Re-saves the PDF structure and keeps text selectable. Savings are modest but safe.'
-      : 'Rasterizing flattens text into images. Switch to “Keep text” when the PDF must stay selectable.';
-
-    els.targetToggle.checked = s.targetEnabled;
-    els.targetControls.hidden = !s.targetEnabled;
-    if (document.activeElement !== els.targetKB) els.targetKB.value = String(s.targetKB);
-
-    updateFormatHint();
-    updateRangeFill(els.quality);
-    updateRangeFill(els.scale);
+    return s;
   }
 
-  function updateRangeFill(input) {
-    var min = Number(input.min) || 0;
-    var max = Number(input.max) || 100;
-    var value = Number(input.value) || min;
-    var percent = max === min ? 0 : ((value - min) / (max - min)) * 100;
-    input.style.setProperty('--fill', percent + '%');
+  function saveSettings() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      safeSet(STORAGE.settings, JSON.stringify(app.settings));
+    }, 200);
   }
 
-  function updateFormatHint() {
-    var hints = {
-      auto: 'WebP is 25–35% smaller than JPEG at the same quality. Transparency is preserved.',
-      original: 'Keeps the source format. Canvas PNG output is rarely smaller than the original.',
-      'image/webp': 'Broad support, strong savings, keeps transparency.',
-      'image/jpeg': 'Universally compatible. Transparency is flattened onto the letterbox colour.',
-      'image/png': 'Lossless with transparency — often much larger than the source.',
-      'image/avif': 'Smallest output, slowest encode. Great for archives.'
+  function updateSettings(patch) {
+    app.settings = normalizeAppSettings(Object.assign({}, app.settings, patch));
+    saveSettings();
+  }
+
+  function engineOptions(overrides) {
+    var s = app.settings;
+    return Object.assign(
+      {
+        quality: s.quality,
+        format: s.format,
+        customMime: s.customMime,
+        targetEnabled: s.targetEnabled,
+        targetMode: s.targetMode,
+        targetKB: s.targetKB,
+        scale: s.scale,
+        resizeMode: 'scale',
+        customWidth: '',
+        customHeight: '',
+        fitMode: 'fit',
+        anchor: 'center',
+        background: s.background,
+        letterbox: s.background === 'black' ? 'black' : 'white',
+        pdfMode: s.pdfMode,
+        pdfDpi: s.pdfDpi
+      },
+      overrides || {}
+    );
+  }
+
+  function storageOptions() {
+    var s = app.settings;
+    return {
+      quality: s.quality,
+      format: s.format,
+      customMime: s.customMime,
+      targetEnabled: s.targetEnabled,
+      targetMode: s.targetMode,
+      targetKB: s.targetKB,
+      scale: s.scale,
+      resizeMode: 'scale',
+      customWidth: s.cropWidth,
+      customHeight: s.cropHeight,
+      fitMode: s.fitMode,
+      anchor: s.anchor,
+      background: s.background,
+      pdfMode: s.pdfMode,
+      pdfDpi: s.pdfDpi
     };
-    els.formatHint.textContent = hints[state.settings.format] || hints.auto;
-    els.formatHint.classList.remove('is-warn');
-    if (state.settings.format === 'image/png') els.formatHint.classList.add('is-warn');
   }
 
-  function syncFormatSupport() {
-    if (!engine || !engine.capabilities) return;
-    var caps = engine.capabilities();
-    if (els.avifOption) els.avifOption.hidden = !caps.avif;
-    var webpOption = els.format.querySelector('option[value="image/webp"]');
-    if (webpOption) webpOption.disabled = !caps.webp;
-    var autoOption = els.format.querySelector('option[value="auto"]');
-    if (autoOption) {
-      autoOption.textContent = caps.webp
-        ? 'Auto — best ratio (WebP)'
-        : 'Auto — best ratio (JPEG)';
-    }
-    if (!caps.avif && state.settings.format === 'image/avif') state.settings.format = 'auto';
-  }
+  // ----------------------------------------------------------------- files --
 
-  function syncFieldVisibility() {
-    var hasItems = state.items.length > 0;
-    var hasImages = state.items.some(function (item) {
-      return item.kind !== 'pdf';
-    });
-    var hasPdf = state.items.some(function (item) {
-      return item.kind === 'pdf';
-    });
-
-    els.formatField.hidden = hasItems && !hasImages;
-    els.resizeField.hidden = hasItems && !hasImages;
-    els.targetField.hidden = hasItems && !hasImages;
-    els.pdfField.hidden = !hasPdf;
-    updateExactHint();
-  }
-
-  function updateExactHint() {
-    var s = state.settings;
-    var width = C.toPositiveInt(s.customWidth);
-    var height = C.toPositiveInt(s.customHeight);
-    var hint = els.exactHint;
-
-    if (!width || !height) {
-      hint.textContent = 'Type one side to keep proportions, or both for an exact box.';
-      hint.classList.remove('is-warn');
-      return;
+  class Files {
+    constructor(options) {
+      var opts = options || {};
+      this.items = [];
+      this.accept = opts.accept || 'all';
+      this.multiple = opts.multiple !== false;
+      this.max = opts.max || LIMITS.files;
+      this.probeMode = opts.probeMode || 'auto';
+      this.onChange = opts.onChange || function () {};
+      this.seq = 0;
     }
 
-    var images = state.items.filter(function (item) {
-      return item.meta && item.meta.width && item.kind !== 'pdf';
-    });
-    if (!images.length) {
-      hint.textContent = 'Images fit inside ' + width + '×' + height + '. Mismatched ratios get a ' + s.letterbox + ' border.';
-      hint.classList.remove('is-warn');
-      return;
+    notify(type, item) {
+      this.onChange(type, item, this);
     }
 
-    var mismatched = images.filter(function (item) {
-      return !C.ratiosClose(item.meta.width, item.meta.height, width, height, 0.01);
-    }).length;
+    add(fileList) {
+      var self = this;
+      var incoming = Array.prototype.slice.call(fileList || []);
+      if (!incoming.length) return;
 
-    if (mismatched) {
-      hint.textContent = mismatched + ' of ' + images.length + ' image' + (images.length === 1 ? '' : 's') +
-        ' will be letterboxed on ' + s.letterbox + '.';
-      hint.classList.add('is-warn');
-    } else {
-      hint.textContent = 'All ' + images.length + ' image' + (images.length === 1 ? '' : 's') + ' match this ratio — no letterboxing.';
-      hint.classList.remove('is-warn');
-    }
-  }
+      var accepted = [];
+      var seen = new Set(this.items.map(function (item) { return item.name + '|' + item.size + '|' + item.file.lastModified; }));
+      var duplicates = 0;
+      var unsupported = 0;
+      var oversized = 0;
 
-  function seedExactDims() {
-    if (state.settings.customWidth || state.settings.customHeight) return;
-    var first = state.items.find(function (item) {
-      return item.meta && item.meta.width && item.kind !== 'pdf';
-    });
-    if (!first) return;
-    state.lockRatio = first.meta.width / first.meta.height;
-    commitSettings({
-      customWidth: first.meta.width,
-      customHeight: first.meta.height,
-      aspectLocked: true
-    });
-  }
-
-  function firstImageRatio() {
-    var first = state.items.find(function (item) {
-      return item.meta && item.meta.width && item.kind !== 'pdf';
-    });
-    if (!first) return null;
-    return first.meta.width / first.meta.height;
-  }
-
-  function resetSettings() {
-    state.settings = C.normalizeSettings(C.DEFAULTS);
-    state.lockRatio = firstImageRatio();
-    applySettingsToUi();
-    saveSettings();
-    markResultsStale();
-    syncFieldVisibility();
-    scheduleEstimate();
-    syncActions();
-    toast('Settings reset to Juicy.', 'ok');
-  }
-
-  function markResultsStale() {
-    var changed = false;
-    state.items.forEach(function (item) {
-      if (item.status === 'done') {
-        item.stale = true;
-        changed = true;
-      }
-    });
-    if (changed) {
-      state.items.forEach(updateRow);
-      updateSummary();
-    }
-  }
-
-  // --------------------------------------------------------------- toasts ---
-
-  function toast(message, tone, action) {
-    if (!els.toasts) return;
-    var el = document.createElement('div');
-    el.className = 'toast' + (tone ? ' is-' + tone : '');
-    var iconId = tone === 'ok' ? 'i-check' : tone === 'error' ? 'i-alert' : 'i-lock';
-    el.innerHTML =
-      '<svg class="icon" aria-hidden="true"><use href="#' + iconId + '"></use></svg>' +
-      '<span class="toast-text"></span>' +
-      '<button type="button" class="toast-close" aria-label="Dismiss"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>';
-    el.querySelector('.toast-text').textContent = message;
-
-    var timer = null;
-    function remove() {
-      clearTimeout(timer);
-      if (el.parentNode) {
-        el.style.opacity = '0';
-        el.style.transform = 'translateY(6px)';
-        el.style.transition = 'opacity 160ms ease, transform 160ms ease';
-        setTimeout(function () {
-          el.remove();
-        }, 170);
-      }
-    }
-
-    if (action && action.label && typeof action.onClick === 'function') {
-      var actionBtn = document.createElement('button');
-      actionBtn.type = 'button';
-      actionBtn.className = 'toast-action';
-      actionBtn.textContent = action.label;
-      actionBtn.addEventListener('click', function () {
-        action.onClick();
-        remove();
+      incoming.forEach(function (file) {
+        if (self.items.length + accepted.length >= self.max) return;
+        if (!file.size) return;
+        if (file.size > LIMITS.bytes) {
+          oversized++;
+          return;
+        }
+        var kind = C.kindOf(file);
+        var allowed = self.accept === 'all' ||
+          (self.accept === 'pdf' && kind === 'pdf') ||
+          (self.accept === 'images' && (kind === 'image' || kind === 'heic'));
+        if (!allowed || kind === 'unknown') {
+          unsupported++;
+          return;
+        }
+        var key = file.name + '|' + file.size + '|' + file.lastModified;
+        if (seen.has(key)) {
+          duplicates++;
+          return;
+        }
+        seen.add(key);
+        accepted.push(file);
       });
-      el.insertBefore(actionBtn, el.querySelector('.toast-close'));
+
+      if (oversized) toast(oversized + ' file(s) over 200 MB skipped.', 'error');
+      if (unsupported) toast(unsupported + ' unsupported file(s) skipped.', 'error');
+      if (duplicates) toast(duplicates + ' duplicate(s) skipped.');
+
+      if (!accepted.length) return;
+
+      if (!this.multiple) {
+        this.items.forEach(cleanupItem);
+        this.items = [];
+        accepted = accepted.slice(0, 1);
+        if (incoming.length > 1) toast('This tool uses one file; the first was kept.');
+      }
+
+      var created = accepted.map(function (file) {
+        return makeItem(self, file);
+      });
+      this.items.push.apply(this.items, created);
+      this.notify('structure');
+      this.probeAll(created);
     }
 
-    el.querySelector('.toast-close').addEventListener('click', remove);
-    els.toasts.appendChild(el);
-    timer = setTimeout(remove, action ? 9000 : 5200);
+    async probeAll(items) {
+      var self = this;
+      var queue = items.slice();
+      if (this.probeMode === 'none') {
+        items.forEach(function (item) {
+          item.probing = false;
+          self.notify('probe', item);
+        });
+        return;
+      }
+      async function worker() {
+        while (queue.length) {
+          var item = queue.shift();
+          if (!self.items.includes(item)) continue;
+          await self.probeItem(item);
+        }
+      }
+      var lanes = [];
+      for (var i = 0; i < Math.min(3, queue.length); i++) lanes.push(worker());
+      await Promise.all(lanes);
+    }
 
-    while (els.toasts.children.length > 3) {
-      els.toasts.removeChild(els.toasts.firstElementChild);
+    async probeItem(item) {
+      try {
+        var info = item.kind === 'pdf' ? await P.probe(item.file) : await E.probe(item.file);
+        if (!this.items.includes(item)) {
+          if (info && info.sample && typeof info.sample.close === 'function') info.sample.close();
+          return;
+        }
+        item.meta = info;
+        item.probing = false;
+        if (info.sample) item.sample = info.sample;
+        if (info.prepared) {
+          item.prepared = info.prepared;
+          if (item.kind === 'heic' && !item.thumbUrl) {
+            item.thumbUrl = trackUrl(item, URL.createObjectURL(info.prepared));
+          }
+        }
+        if (info.thumb) item.thumbData = info.thumb;
+        if (item.error) {
+          item.error = null;
+          item.status = 'queued';
+        }
+      } catch (err) {
+        item.probing = false;
+        item.error = err && err.message ? err.message : 'Could not read this file.';
+        item.status = 'error';
+      }
+      this.notify('probe', item);
+    }
+
+    remove(id) {
+      var index = this.items.findIndex(function (item) { return item.id === id; });
+      if (index < 0) return;
+      cleanupItem(this.items[index]);
+      this.items.splice(index, 1);
+      this.notify('structure');
+    }
+
+    move(id, direction) {
+      var index = this.items.findIndex(function (item) { return item.id === id; });
+      var target = index + (direction === 'up' ? -1 : 1);
+      if (index < 0 || target < 0 || target >= this.items.length) return;
+      var item = this.items[index];
+      this.items[index] = this.items[target];
+      this.items[target] = item;
+      this.notify('structure');
+    }
+
+    clear() {
+      this.items.forEach(cleanupItem);
+      this.items = [];
+      this.notify('structure');
+    }
+
+    cleanup() {
+      this.items.forEach(cleanupItem);
+      this.items = [];
     }
   }
 
-  function announce(message) {
-    if (!els.liveStatus) return;
-    els.liveStatus.textContent = '';
-    setTimeout(function () {
-      els.liveStatus.textContent = message;
-    }, 40);
-  }
-
-  // ------------------------------------------------------------- file queue --
-
-  function addFiles(fileList, source) {
-    var incoming = Array.prototype.slice.call(fileList || []);
-    if (!incoming.length) return;
-
-    var accepted = [];
-    var duplicates = 0;
-    var unsupported = [];
-    var oversized = [];
-    var empty = 0;
-    var overflow = 0;
-
-    var existing = new Set(state.items.map(function (item) {
-      return item.name + '|' + item.size + '|' + item.file.lastModified;
-    }));
-
-    incoming.forEach(function (file) {
-      if (state.items.length + accepted.length >= LIMITS.maxFiles) {
-        overflow++;
-        return;
-      }
-      if (!file.size) {
-        empty++;
-        return;
-      }
-      if (file.size > LIMITS.maxFileBytes) {
-        oversized.push(file.name);
-        return;
-      }
-      if (!C.isSupported(file)) {
-        unsupported.push(file.name);
-        return;
-      }
-      var key = file.name + '|' + file.size + '|' + file.lastModified;
-      if (existing.has(key)) {
-        duplicates++;
-        return;
-      }
-      existing.add(key);
-      accepted.push(file);
-    });
-
-    if (duplicates) toast(duplicates + ' duplicate' + (duplicates === 1 ? '' : 's') + ' skipped.', 'info');
-    if (unsupported.length) {
-      toast('Not supported: ' + unsupported.slice(0, 2).join(', ') + (unsupported.length > 2 ? '…' : ''), 'error');
-    }
-    if (oversized.length) {
-      toast('Over 200 MB: ' + oversized.slice(0, 2).join(', '), 'error');
-    }
-    if (empty) toast('Empty file' + (empty === 1 ? '' : 's') + ' skipped.', 'error');
-    if (overflow) toast('Basket limit is ' + LIMITS.maxFiles + ' files.', 'error');
-    if (!accepted.length) return;
-
-    var created = accepted.map(createItem);
-    created.forEach(function (item) {
-      state.items.push(item);
-    });
-
-    if (source === 'pasted') toast(created.length + ' pasted file' + (created.length === 1 ? '' : 's') + ' added.', 'ok');
-    if (!state.lockRatio) state.lockRatio = null;
-
-    renderQueue();
-    syncFieldVisibility();
-    syncActions();
-    updateSummary();
-    scheduleEstimate();
-    probeItems(created);
-  }
-
-  function createItem(file) {
-    var kind = C.kindOf(file);
+  function makeItem(files, file) {
     var item = {
-      id: 'f' + ++state.idSeq,
+      id: 'f' + ++files.seq,
       file: file,
       name: file.name,
       size: file.size,
-      kind: kind,
+      kind: C.kindOf(file),
       ext: C.extOf(file.name) || 'file',
       status: 'queued',
       progress: 0,
@@ -692,8 +464,7 @@
       thumbData: null,
       objectUrls: []
     };
-
-    if (kind === 'image') {
+    if (item.kind === 'image') {
       item.thumbUrl = trackUrl(item, URL.createObjectURL(file));
     }
     return item;
@@ -722,916 +493,409 @@
     item.objectUrls = [];
   }
 
-  async function probeItems(items) {
-    var queue = items.slice();
-    var workers = Math.min(3, queue.length);
+  // ------------------------------------------------------------- rendering --
 
-    async function worker() {
-      while (queue.length) {
-        var item = queue.shift();
-        if (!state.items.includes(item)) continue;
-        await probeItem(item);
-      }
-    }
-
-    var lanes = [];
-    for (var i = 0; i < workers; i++) lanes.push(worker());
-    await Promise.all(lanes);
-  }
-
-  async function probeItem(item) {
-    try {
-      var info = await engine.probe(item.file);
-      if (!state.items.includes(item)) {
-        if (info && info.sample && typeof info.sample.close === 'function') {
-          try { info.sample.close(); } catch (err) { /* noop */ }
-        }
-        return;
-      }
-
-      item.meta = info;
-      item.probing = false;
-      item.sample = info.sample || null;
-      item.hasAlpha = info.hasAlpha;
-      if (info.prepared) {
-        item.prepared = info.prepared;
-        if (item.kind === 'heic' && !item.thumbUrl) {
-          item.thumbUrl = trackUrl(item, URL.createObjectURL(info.prepared));
-        }
-      }
-      if (info.thumb) item.thumbData = info.thumb;
-      if (!state.lockRatio && info.width) state.lockRatio = info.width / info.height;
-
-      if (item.status === 'error') {
-        item.status = 'queued';
-        item.error = null;
-      }
-    } catch (err) {
-      if (!state.items.includes(item)) return;
-      item.probing = false;
-      item.status = 'error';
-      item.error = err && err.message ? err.message : 'Could not read this file.';
-    }
-
-    updateRow(item);
-    updateExactHint();
-    updateSummary();
-    syncActions();
-    scheduleEstimate();
-    if (state.settings.resizeMode === 'exact') maybeSeedExactFromItem(item);
-  }
-
-  function maybeSeedExactFromItem(item) {
-    if (!item.meta || !item.meta.width) return;
-    if (state.settings.customWidth || state.settings.customHeight) return;
-    state.lockRatio = item.meta.width / item.meta.height;
-    commitSettings({ customWidth: item.meta.width, customHeight: item.meta.height });
-  }
-
-  function removeItem(id) {
-    var index = state.items.findIndex(function (item) {
-      return item.id === id;
-    });
-    if (index < 0) return;
-    var item = state.items[index];
-    cleanupItem(item);
-    state.items.splice(index, 1);
-    state.estimates.delete(id);
-    invalidateEstimateCache();
-    renderQueue();
-    syncFieldVisibility();
-    syncActions();
-    scheduleEstimate();
-  }
-
-  function clearQueue() {
-    if (!state.items.length) return;
-    state.items.forEach(cleanupItem);
-    state.items = [];
-    state.estimates.clear();
-    state.estimateCache.clear();
-    state.compare.item = null;
-    renderQueue();
-    syncFieldVisibility();
-    syncActions();
-    updateSummary();
-    announce('Basket cleared.');
-  }
-
-  function invalidateEstimateCache() {
-    if (state.estimateCache.size > 240) state.estimateCache.clear();
-  }
-
-  // --------------------------------------------------------------- render ---
-
-  function renderQueue() {
-    var hasItems = state.items.length > 0;
-    els.queue.hidden = !hasItems;
-    els.valueStrip.hidden = hasItems;
-    els.workspace.classList.toggle('has-queue', hasItems);
-
-    if (!hasItems) {
-      els.fileList.innerHTML = '';
-      els.queueCount.textContent = '0';
-      els.queueSummary.textContent = 'No files yet';
-      updateSummary();
-      return;
-    }
-
-    var existing = new Map();
-    Array.prototype.slice.call(els.fileList.children).forEach(function (row) {
-      existing.set(row.dataset.id, row);
-    });
-
-    state.items.forEach(function (item, index) {
-      var row = existing.get(item.id);
-      if (!row) {
-        row = createRow(item);
-      } else {
-        existing.delete(item.id);
-      }
-      if (els.fileList.children[index] !== row) {
-        els.fileList.insertBefore(row, els.fileList.children[index] || null);
-      }
-      updateRow(item);
-    });
-
-    existing.forEach(function (row) {
-      row.remove();
-    });
-
-    updateSummary();
-  }
-
-  function createRow(item) {
-    var row = document.createElement('li');
-    row.className = 'file';
-    row.dataset.id = item.id;
-    row.innerHTML =
-      '<div class="file-thumb">' +
-        '<svg class="icon" aria-hidden="true"><use href="#i-image"></use></svg>' +
-        '<img alt="" hidden>' +
-      '</div>' +
-      '<div class="file-main">' +
-        '<p class="file-name"></p>' +
-        '<p class="file-meta"></p>' +
-        '<div class="file-progress" hidden>' +
-          '<span class="progress" aria-hidden="true"><span></span></span>' +
-          '<span class="progress-label"></span>' +
-        '</div>' +
-        '<p class="file-note" hidden>' +
-          '<svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>' +
-          '<span class="note-text"></span>' +
-        '</p>' +
-      '</div>' +
-      '<div class="file-detail">' +
-        '<div class="file-size">' +
-          '<span class="size-line"><span class="size-before"></span><span class="size-arrow" aria-hidden="true">→</span><span class="size-after"></span></span>' +
-          '<span class="pill pill-save" hidden></span>' +
-        '</div>' +
-        '<div class="file-actions">' +
-          '<button type="button" class="icon-btn" data-action="compare" hidden aria-label="Compare original and squeezed">' +
-            '<svg class="icon" aria-hidden="true"><use href="#i-compare"></use></svg>' +
-          '</button>' +
-          '<button type="button" class="icon-btn" data-action="download" hidden aria-label="Download squeezed file">' +
-            '<svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>' +
-          '</button>' +
-          '<button type="button" class="icon-btn" data-action="retry" hidden aria-label="Try again">' +
-            '<svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>' +
-          '</button>' +
-          '<button type="button" class="icon-btn" data-action="remove" aria-label="Remove file">' +
-            '<svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>' +
-          '</button>' +
-        '</div>' +
-      '</div>';
-
-    var img = row.querySelector('.file-thumb img');
-    img.addEventListener('error', function () {
-      img.hidden = true;
-    });
-
-    row.addEventListener('animationend', function () {
-      row.classList.remove('is-new');
-    });
-    return row;
-  }
-
-  function updateRow(item) {
-    var row = els.fileList.querySelector('[data-id="' + item.id + '"]');
-    if (!row) return;
-
-    row.className = 'file is-' + item.status + (item.stale ? ' is-stale' : '');
-
-    var nameEl = row.querySelector('.file-name');
-    nameEl.textContent = item.name;
-    nameEl.title = item.name;
-
-    var metaEl = row.querySelector('.file-meta');
-    metaEl.textContent = metaLine(item);
-
-    var thumb = row.querySelector('.file-thumb');
-    var img = thumb.querySelector('img');
-    var thumbSource = item.thumbData || item.thumbUrl;
-    if (thumbSource) {
-      if (img.getAttribute('src') !== thumbSource) img.src = thumbSource;
-      img.hidden = false;
-    } else {
-      img.hidden = true;
-    }
-    thumb.classList.toggle('is-pdf', item.kind === 'pdf');
-    thumb.classList.toggle('is-heic', item.kind === 'heic' && !thumbSource);
-    var thumbIcon = thumb.querySelector('use');
-    if (thumbIcon) {
-      thumbIcon.setAttribute('href', item.kind === 'pdf' ? '#i-file' : item.kind === 'heic' ? '#i-image' : '#i-image');
-    }
-
-    // progress row
-    var progressWrap = row.querySelector('.file-progress');
-    var progressBar = progressWrap.querySelector('.progress > span');
-    var progressLabel = progressWrap.querySelector('.progress-label');
-    if (item.status === 'processing') {
-      progressWrap.hidden = false;
-      progressBar.style.width = Math.max(2, Math.min(100, item.progress)) + '%';
-      progressLabel.textContent = (item.stage ? item.stage + ' · ' : '') + Math.round(item.progress) + '%';
-    } else {
-      progressWrap.hidden = true;
-    }
-
-    // note row
-    var noteEl = row.querySelector('.file-note');
-    var noteText = row.querySelector('.note-text');
-    var noteIcon = noteEl.querySelector('use');
-    var note = null;
-    var noteTone = '';
-    var noteIconId = 'i-check';
-
-    if (item.status === 'error') {
-      note = item.error || 'Something went wrong.';
-      noteTone = 'is-error';
-      noteIconId = 'i-alert';
-    } else if (item.status === 'done' && item.stale) {
-      note = 'Settings changed — squeeze again to apply them.';
-      noteTone = 'is-warn';
-      noteIconId = 'i-refresh';
-    } else if (item.status === 'done' && item.note) {
-      note = item.note;
-      noteTone = item.result && item.result.usedOriginal ? 'is-warn' : 'is-ok';
-      noteIconId = item.result && item.result.usedOriginal ? 'i-alert' : 'i-check';
-    } else if (item.probing) {
-      note = 'Reading file…';
-      noteTone = '';
-      noteIconId = 'i-refresh';
-    }
-
-    if (note) {
-      noteEl.hidden = false;
-      noteEl.className = 'file-note ' + noteTone;
-      noteIcon.setAttribute('href', '#' + noteIconId);
-      noteText.textContent = note;
-    } else {
-      noteEl.hidden = true;
-    }
-
-    // size block
-    var before = row.querySelector('.size-before');
-    var arrow = row.querySelector('.size-arrow');
-    var after = row.querySelector('.size-after');
-    var pill = row.querySelector('.pill-save');
-    before.textContent = C.formatBytes(item.size);
-
-    if (item.result) {
-      arrow.hidden = false;
-      after.hidden = false;
-      after.textContent = C.formatBytes(item.result.blob.size);
-      pill.hidden = false;
-      var saved = C.savingsPercent(item.size, item.result.blob.size);
-      pill.className = 'pill';
-      if (item.result.usedOriginal) {
-        pill.classList.add('pill-even');
-        pill.textContent = 'Original kept';
-      } else if (saved < 0) {
-        pill.classList.add('pill-warn');
-        pill.textContent = '+' + Math.abs(saved) + '% larger';
-      } else {
-        pill.classList.add('pill-save');
-        pill.textContent = '−' + saved + '%';
-      }
-      if (item.stale) {
-        pill.classList.add('pill-stale');
-        pill.textContent = 'Stale';
-      }
-    } else {
-      arrow.hidden = true;
-      after.hidden = true;
-      pill.hidden = true;
-    }
-
-    // actions
-    var compareBtn = row.querySelector('[data-action="compare"]');
-    var downloadBtn = row.querySelector('[data-action="download"]');
-    var retryBtn = row.querySelector('[data-action="retry"]');
-    var removeBtn = row.querySelector('[data-action="remove"]');
-
-    var canCompare = !!item.result && item.kind !== 'pdf' && !!item.thumbUrl;
-    compareBtn.hidden = !canCompare;
-    downloadBtn.hidden = !item.result;
-    retryBtn.hidden = !(item.status === 'error' || (item.status === 'done' && item.stale));
-    removeBtn.hidden = false;
-
-    downloadBtn.setAttribute('aria-label', 'Download squeezed ' + item.name);
-    retryBtn.setAttribute('aria-label', (item.status === 'error' ? 'Retry ' : 'Squeeze again ') + item.name);
-    removeBtn.setAttribute('aria-label', 'Remove ' + item.name);
-    removeBtn.disabled = state.busy && item.status === 'processing';
-    retryBtn.disabled = state.busy;
-    compareBtn.disabled = state.busy && item.status === 'processing';
-  }
-
-  function metaLine(item) {
-    var bits = [item.ext ? item.ext.toUpperCase() : 'FILE'];
-    if (item.meta && item.meta.width && item.meta.height) {
-      bits.push(item.meta.width + '×' + item.meta.height);
-    }
-    if (item.meta && item.meta.pages) {
-      bits.push(item.meta.pages + (item.meta.pages === 1 ? ' page' : ' pages'));
-    }
-    if (item.result && item.result.qualityUsed && item.result.mimeType !== 'application/pdf') {
-      bits.push('q' + Math.round(item.result.qualityUsed * 100));
-    }
+  function fileMeta(item) {
+    var bits = [item.ext.toUpperCase()];
+    if (item.meta && item.meta.width && item.meta.height) bits.push(item.meta.width + '×' + item.meta.height);
+    if (item.meta && item.meta.pages) bits.push(item.meta.pages + ' page' + (item.meta.pages === 1 ? '' : 's'));
+    if (item.probing) bits.push('reading…');
     return bits.join(' · ');
   }
 
-  function handleRowAction(action, id) {
-    var item = state.items.find(function (entry) {
-      return entry.id === id;
-    });
-    if (!item) return;
+  function fileRow(item, opts) {
+    var row = document.createElement('li');
+    row.className = 'file-row';
+    row.dataset.id = item.id;
+    row.innerHTML =
+      '<span class="thumb"></span>' +
+      '<span class="file-main">' +
+        '<span class="file-name"></span>' +
+        '<span class="file-meta"></span>' +
+        '<span class="file-status" hidden><span class="progress"><span></span></span><span class="status-text"></span></span>' +
+      '</span>' +
+      '<span class="file-detail"><span class="file-size"></span><span class="row-actions"></span></span>';
 
-    if (action === 'remove') {
-      if (item.status === 'processing') return;
-      removeItem(id);
-      return;
-    }
-    if (action === 'download') {
-      if (!item.result) return;
-      downloadBlob(item.result.blob, item.result.fileName);
-      toast('Downloaded ' + item.result.fileName, 'ok');
-      return;
-    }
-    if (action === 'compare') {
-      openCompare(item);
-      return;
-    }
-    if (action === 'retry') {
-      if (state.busy) return;
-      if (!item.meta) {
-        item.status = 'queued';
-        item.error = null;
-        item.probing = true;
-        updateRow(item);
-        probeItems([item]);
-      } else {
-        runItems([item]);
-      }
-    }
-  }
-
-  // ------------------------------------------------------------- estimates ---
-
-  function scheduleEstimate() {
-    clearTimeout(state.estimateTimer);
-    state.estimateTimer = setTimeout(recalculateEstimates, 260);
-  }
-
-  async function recalculateEstimates() {
-    var token = ++state.estimateToken;
-    var items = state.items.slice();
-    if (!items.length) {
-      state.estimates.clear();
-      state.estimating = false;
-      updateSummary();
-      return;
-    }
-
-    state.estimating = true;
-    updateSummary();
-    var signature = C.settingsSignature(state.settings);
-    var result = new Map();
-
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      if (token !== state.estimateToken) return;
-
-      if (item.status === 'done' && item.result && !item.stale) {
-        result.set(item.id, item.result.blob.size);
-        continue;
-      }
-
-      var cacheKey = item.id + ':' + signature;
-      if (state.estimateCache.has(cacheKey)) {
-        result.set(item.id, state.estimateCache.get(cacheKey));
-        continue;
-      }
-
-      var bytes = null;
-      if (item.kind === 'pdf') {
-        bytes = engine.estimatePdf(item.file, state.settings, item.meta || {});
-      } else if (item.sample && item.meta) {
-        try {
-          var estimate = await engine.estimateImage(
-            item.sample,
-            {
-              width: item.meta.width,
-              height: item.meta.height,
-              hasAlpha: item.hasAlpha,
-              mimeType: item.meta.mimeType
-            },
-            state.settings
-          );
-          if (estimate) bytes = estimate.bytes;
-        } catch (err) {
-          bytes = null;
-        }
-      }
-
-      // The compressor keeps the original when a re-encode would be larger and
-      // nothing was explicitly changed. Mirror that so estimates stay honest.
-      if (bytes != null && item.kind !== 'pdf' && item.kind !== 'heic') {
-        var noResize = state.settings.resizeMode !== 'exact' &&
-          (state.settings.resizeMode !== 'scale' || state.settings.scale >= 100);
-        var autoFormat = state.settings.format === 'auto' || state.settings.format === 'original';
-        if (noResize && autoFormat && !state.settings.targetEnabled && bytes > item.size) {
-          bytes = item.size;
-        }
-      }
-
-      if (token !== state.estimateToken) return;
-      if (bytes != null) {
-        result.set(item.id, bytes);
-        state.estimateCache.set(cacheKey, bytes);
-        invalidateEstimateCache();
-        state.estimates = result;
-        updateSummary();
-      }
-    }
-
-    state.estimates = result;
-    state.estimating = false;
-    updateSummary();
-  }
-
-  // --------------------------------------------------------------- summary ---
-
-  function summarise() {
-    var total = state.items.length;
-    var before = 0;
-    var after = 0;
-    var done = 0;
-    var estimated = 0;
-    var unknown = 0;
-
-    state.items.forEach(function (item) {
-      before += item.size;
-      var estimate = state.estimates.get(item.id);
-      if (item.status === 'done' && item.result && !item.stale) {
-        after += item.result.blob.size;
-        done++;
-      } else if (typeof estimate === 'number') {
-        after += estimate;
-        estimated++;
-      } else {
-        after += item.size;
-        unknown++;
-      }
-    });
-
-    return {
-      total: total,
-      before: before,
-      after: after,
-      done: done,
-      estimated: estimated,
-      unknown: unknown,
-      savings: C.savingsPercent(before, after)
-    };
-  }
-
-  function updateSummary() {
-    var stats = summarise();
-
-    if (!state.items.length) {
-      els.estimateValue.textContent = '—';
-      els.estimatePill.textContent = '—';
-      els.estimatePill.className = 'pill';
-      els.estimateMeter.style.width = '0%';
-      els.estimateNote.textContent = 'Add files to see a live estimate.';
-      els.queueSummary.textContent = 'No files yet';
-      return;
-    }
-
-    var allDone = stats.done === stats.total;
-    var measuring = !allDone && (stats.unknown > 0 || state.estimating);
-    var nothingYet = !allDone && stats.done === 0 && stats.estimated === 0;
-
-    if (nothingYet) {
-      els.estimateValue.textContent = '—';
-      els.estimatePill.textContent = 'Measuring';
-      els.estimatePill.className = 'pill';
-      els.estimateMeter.style.width = '0%';
-      els.estimateNote.textContent = 'Measuring your files — no uploads, this happens here.';
-      els.queueSummary.textContent =
-        stats.total + (stats.total === 1 ? ' file' : ' files') +
-        ' · ' + C.formatBytes(stats.before) + ' · measuring…';
-      els.queueCount.textContent = String(stats.total);
-      return;
-    }
-
-    var prefix = allDone ? '' : '≈ ';
-    els.estimateValue.textContent = prefix + C.formatBytes(stats.after);
-    els.estimatePill.textContent = (stats.savings >= 0 ? '−' : '+') + Math.abs(stats.savings) + '%';
-    els.estimatePill.className = 'pill' + (stats.savings < 0 ? ' is-negative' : '');
-    els.estimateMeter.style.width = Math.max(0, Math.min(100, stats.savings)) + '%';
-
-    var note;
-    if (allDone) {
-      note = stats.total + ' of ' + stats.total + ' squeezed · saves ' + C.formatBytes(Math.max(0, stats.before - stats.after));
-    } else if (stats.done) {
-      note = stats.done + ' of ' + stats.total + ' squeezed' + (measuring ? ' · measuring the rest' : ' · estimate for the rest');
-    } else if (measuring) {
-      note = 'Measured ' + stats.estimated + ' of ' + stats.total + ' · still measuring';
-    } else {
-      note = 'Measured estimate · squeeze to confirm';
-    }
-    if (!allDone && stats.savings < 0) note += ' · output is larger, consider a lower quality';
-    els.estimateNote.textContent = note;
-
-    els.queueCount.textContent = String(stats.total);
-    els.queueSummary.textContent =
-      stats.total + (stats.total === 1 ? ' file' : ' files') +
-      ' · ' + C.formatBytes(stats.before) +
-      ' → ' + (allDone ? '' : '≈ ') + C.formatBytes(stats.after);
-  }
-
-  function syncActions() {
-    var pending = state.items.filter(function (item) {
-      return item.status !== 'done' || item.stale;
-    }).length;
-    var done = state.items.filter(function (item) {
-      return item.status === 'done' && item.result;
-    }).length;
-
-    els.squeezeBtn.disabled = state.busy || pending === 0 || !state.items.length;
-    els.squeezeLabel.textContent = state.busy
-      ? 'Squeezing…'
-      : pending === 0 && state.items.length
-        ? 'All squeezed'
-        : 'Squeeze ' + (pending || state.items.length) + (pending === 1 ? ' file' : ' files');
-
-    els.zipBtn.hidden = done === 0;
-    if (done) els.zipLabel.textContent = 'ZIP (' + done + ')';
-    els.clearBtn.disabled = state.busy;
-    els.zipBtn.disabled = state.busy;
-  }
-
-  // ------------------------------------------------------------- processing ---
-
-  function squeezeAll() {
-    var targets = state.items.filter(function (item) {
-      return item.status !== 'done' || item.stale;
-    });
-    if (!targets.length || state.busy) return;
-    runItems(targets);
-  }
-
-  async function runItems(targets) {
-    if (state.busy) return;
-    var valid = targets.filter(function (item) {
-      return state.items.includes(item);
-    });
-    if (!valid.length) return;
-
-    state.busy = true;
-    syncActions();
-    state.items.forEach(updateRow);
-
-    var options = Object.assign({}, state.settings);
-    var runSignature = C.settingsSignature(state.settings);
-    var cursor = 0;
-    var concurrency = Math.min(2, valid.length);
-
-    async function worker() {
-      while (cursor < valid.length) {
-        var item = valid[cursor++];
-        await processItem(item, options);
-      }
-    }
-
-    var lanes = [];
-    for (var i = 0; i < concurrency; i++) lanes.push(worker());
-    await Promise.all(lanes);
-
-    state.busy = false;
-
-    // If the controls moved while this batch was running, those results are stale.
-    if (C.settingsSignature(state.settings) !== runSignature) {
-      valid.forEach(function (item) {
-        if (item.status === 'done') item.stale = true;
+    var thumb = row.querySelector('.thumb');
+    var thumbSrc = item.thumbData || item.thumbUrl;
+    if (thumbSrc) {
+      var img = document.createElement('img');
+      img.alt = '';
+      img.src = thumbSrc;
+      img.addEventListener('error', function () {
+        img.remove();
+        thumb.textContent = item.ext.toUpperCase();
       });
-      toast('Settings changed mid-batch — squeeze again to apply them.', 'info');
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent = item.kind === 'pdf' ? 'pdf' : item.ext.toUpperCase();
     }
+    if (item.kind === 'pdf') thumb.classList.add('is-pdf');
 
-    state.items.forEach(updateRow);
-    syncActions();
-    updateSummary();
-
-    var ok = valid.filter(function (item) {
-      return item.status === 'done';
-    }).length;
-    var failed = valid.filter(function (item) {
-      return item.status === 'error';
-    }).length;
-    var totalSaved = valid.reduce(function (sum, item) {
-      return item.result ? sum + Math.max(0, item.size - item.result.blob.size) : sum;
-    }, 0);
-
-    if (failed) {
-      toast(ok + ' squeezed, ' + failed + ' failed — see the rows for details.', 'error');
-      announce(ok + ' files squeezed. ' + failed + ' failed.');
-    } else if (ok) {
-      toast('Squeezed ' + ok + ' file' + (ok === 1 ? '' : 's') + ' · saved ' + C.formatBytes(totalSaved) + '.', 'ok');
-      announce(ok + ' files squeezed. Saved ' + C.formatBytes(totalSaved) + '.');
-    }
+    row.querySelector('.file-name').textContent = item.name;
+    row.querySelector('.file-meta').textContent = fileMeta(item);
+    updateRow(item, row);
+    updateRowActions(row, item, opts);
+    return row;
   }
 
-  async function processItem(item, options) {
-    if (!state.items.includes(item)) return;
+  function updateRow(item, row) {
+    if (!row) return;
+    row.className = 'file-row' + (item.status === 'error' ? ' is-error' : '');
+    row.querySelector('.file-meta').textContent = fileMeta(item);
 
-    item.status = 'processing';
-    item.progress = 2;
-    item.stage = 'Preparing';
-    item.error = null;
-    item.stale = false;
-    updateRow(item);
+    var status = row.querySelector('.file-status');
+    var text = row.querySelector('.status-text');
+    var fill = row.querySelector('.progress > span');
+    var message = '';
+    var tone = '';
 
-    try {
-      var result = await engine.compress(
-        item.prepared || item.file,
-        options,
-        function (percent, label) {
-          if (!state.items.includes(item)) return;
-          item.progress = Math.max(item.progress, Math.min(100, Number(percent) || 0));
-          item.stage = label || '';
-          updateRow(item);
-        },
-        {
-          kind: item.kind,
-          originalName: item.name,
-          prepared: item.prepared,
-          mimeType: item.meta && item.meta.mimeType
+    if (item.status === 'error') {
+      message = item.error || 'Something went wrong.';
+      tone = 'is-error';
+    } else if (item.status === 'processing') {
+      message = (item.stage || 'working') + ' · ' + Math.round(item.progress) + '%';
+      fill.style.width = Math.max(2, Math.min(100, item.progress)) + '%';
+    } else if (item.result && item.stale) {
+      message = 'settings changed — run again';
+    } else if (item.result && item.note) {
+      message = item.note;
+      tone = item.result.usedOriginal ? '' : 'is-ok';
+    } else if (item.probing) {
+      message = 'reading file…';
+    }
+
+    if (message) {
+      status.hidden = false;
+      status.className = 'file-status ' + tone;
+      text.textContent = message;
+      row.querySelector('.progress').hidden = item.status !== 'processing';
+    } else {
+      status.hidden = true;
+      row.querySelector('.progress').hidden = true;
+    }
+
+    var size = row.querySelector('.file-size');
+    size.textContent = '';
+    var before = document.createElement('span');
+    before.className = 'size-before';
+    before.textContent = C.formatBytes(item.size);
+    size.appendChild(before);
+
+    if (item.result) {
+      var arrow = document.createElement('span');
+      arrow.className = 'size-before';
+      arrow.textContent = '→';
+      size.appendChild(arrow);
+      var after = document.createElement('span');
+      after.className = 'size-after';
+      after.textContent = C.formatBytes(item.result.blob.size);
+      size.appendChild(after);
+
+      var savings = document.createElement('span');
+      savings.className = 'savings';
+      if (item.stale) {
+        savings.textContent = 'stale';
+        savings.classList.add('is-warn');
+      } else if (item.result.usedOriginal) {
+        savings.textContent = 'original kept';
+        savings.classList.add('is-warn');
+      } else if (item.result.exactSize) {
+        savings.textContent = 'exact';
+      } else {
+        var percent = C.savingsPercent(item.size, item.result.blob.size);
+        if (percent < 0) {
+          savings.classList.add('is-error');
+          savings.textContent = '+' + Math.abs(percent) + '%';
+        } else {
+          savings.textContent = '−' + percent + '%';
         }
-      );
-
-      if (!state.items.includes(item)) return;
-      item.status = 'done';
-      item.progress = 100;
-      item.stage = 'Done';
-      item.result = result;
-      item.note = result.note || '';
-    } catch (err) {
-      if (!state.items.includes(item)) return;
-      item.status = 'error';
-      item.progress = 0;
-      item.error = err && err.message ? err.message : 'Compression failed.';
-      item.result = null;
-    }
-
-    updateRow(item);
-    updateSummary();
-    syncActions();
-  }
-
-  function downloadZip() {
-    var completed = state.items.filter(function (item) {
-      return item.status === 'done' && item.result;
-    });
-    if (!completed.length) return;
-
-    if (!window.JSZip) {
-      toast('The ZIP library did not load. Reload and try again.', 'error');
-      return;
-    }
-
-    var zip = new window.JSZip();
-    var used = new Set();
-    completed.forEach(function (item) {
-      var name = C.uniqueName(item.result.fileName, used);
-      used.add(name);
-      zip.file(name, item.result.blob);
-    });
-
-    els.zipBtn.disabled = true;
-    var originalLabel = els.zipLabel.textContent;
-    els.zipLabel.textContent = '0%';
-
-    zip.generateAsync({ type: 'blob', compression: 'STORE' }, function (meta) {
-      els.zipLabel.textContent = Math.round(meta.percent) + '%';
-    }).then(function (blob) {
-      downloadBlob(blob, 'optipress-basket.zip');
-      toast('ZIP with ' + completed.length + ' files downloaded.', 'ok');
-    }).catch(function () {
-      toast('Could not build the ZIP.', 'error');
-    }).finally(function () {
-      els.zipBtn.disabled = false;
-      els.zipLabel.textContent = originalLabel;
-    });
-  }
-
-  // ---------------------------------------------------------------- compare ---
-
-  function bindCompareModal() {
-    els.closeModalBtn.addEventListener('click', closeCompare);
-    els.compareModal.addEventListener('mousedown', function (event) {
-      if (event.target === els.compareModal) closeCompare();
-    });
-    els.compareModal.addEventListener('keydown', function (event) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeCompare();
-        return;
       }
-      if (event.key === 'Tab') trapFocus(event);
-    });
-
-    els.compareArea.addEventListener('pointerdown', function (event) {
-      state.compare.dragging = true;
-      els.compareArea.setPointerCapture(event.pointerId);
-      setFromPointer(event);
-    });
-    els.compareArea.addEventListener('pointermove', function (event) {
-      if (!state.compare.dragging) return;
-      setFromPointer(event);
-    });
-    els.compareArea.addEventListener('pointerup', function () {
-      state.compare.dragging = false;
-    });
-    els.compareArea.addEventListener('pointercancel', function () {
-      state.compare.dragging = false;
-    });
-
-    els.compareKnob.addEventListener('keydown', function (event) {
-      var current = Number(els.compareKnob.getAttribute('aria-valuenow')) || 50;
-      var next = null;
-      if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = current - (event.shiftKey ? 10 : 2);
-      else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = current + (event.shiftKey ? 10 : 2);
-      else if (event.key === 'Home') next = 0;
-      else if (event.key === 'End') next = 100;
-      if (next === null) return;
-      event.preventDefault();
-      setComparePosition(next);
-    });
-  }
-
-  function trapFocus(event) {
-    var focusable = els.compareModal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    if (!focusable.length) return;
-    var first = focusable[0];
-    var last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
+      size.appendChild(savings);
     }
   }
 
-  function setFromPointer(event) {
-    var rect = els.compareArea.getBoundingClientRect();
-    var percent = ((event.clientX - rect.left) / rect.width) * 100;
-    setComparePosition(percent);
-  }
+  function updateRowActions(row, item, opts) {
+    var host = row.querySelector('.row-actions');
+    host.textContent = '';
+    var options = opts || {};
 
-  function setComparePosition(percent) {
-    var value = Math.max(0, Math.min(100, percent));
-    els.compareArea.style.setProperty('--pos', value + '%');
-    els.compareKnob.setAttribute('aria-valuenow', String(Math.round(value)));
-  }
-
-  function openCompare(item) {
-    if (!item.result) return;
-
-    closeCompare(true);
-    state.compare.item = item;
-    state.compare.lastFocus = document.activeElement;
-
-    var beforeBlob = item.prepared || item.file;
-    var beforeUrl = URL.createObjectURL(beforeBlob);
-    var afterUrl = URL.createObjectURL(item.result.blob);
-    state.compare.urls = [beforeUrl, afterUrl];
-
-    els.compareBefore.src = beforeUrl;
-    els.compareAfter.src = afterUrl;
-    els.compareFile.textContent = item.name;
-
-    var beforeDims = item.meta && item.meta.width ? item.meta.width + '×' + item.meta.height : '—';
-    var afterDims = item.result.width && item.result.height ? item.result.width + '×' + item.result.height : '—';
-    els.metaBefore.textContent = C.formatBytes(item.size) + ' · ' + beforeDims;
-    els.metaAfter.textContent = C.formatBytes(item.result.blob.size) + ' · ' + afterDims;
-    var saved = C.savingsPercent(item.size, item.result.blob.size);
-    els.metaSaved.textContent = (saved >= 0 ? '−' : '+') + Math.abs(saved) + '%';
-
-    setComparePosition(50);
-    els.compareModal.hidden = false;
-    document.body.style.overflow = 'hidden';
-    requestAnimationFrame(function () {
-      els.compareKnob.focus();
-    });
-  }
-
-  function closeCompare(silent) {
-    if (els.compareModal.hidden) return;
-    els.compareModal.hidden = true;
-    document.body.style.overflow = '';
-    state.compare.urls.forEach(function (url) {
-      try {
-        URL.revokeObjectURL(url);
-      } catch (err) {
-        /* noop */
-      }
-    });
-    state.compare.urls = [];
-    els.compareBefore.removeAttribute('src');
-    els.compareAfter.removeAttribute('src');
-    state.compare.item = null;
-    if (!silent && state.compare.lastFocus && document.contains(state.compare.lastFocus)) {
-      state.compare.lastFocus.focus();
+    function action(name, label, danger) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'row-action' + (danger ? ' is-danger' : '');
+      button.dataset.action = name;
+      button.textContent = label;
+      button.setAttribute('aria-label', label + ' ' + item.name);
+      host.appendChild(button);
     }
-    state.compare.lastFocus = null;
+
+    if (options.reorder) {
+      action('up', '↑');
+      action('down', '↓');
+    }
+    if (item.result) {
+      action('save', 'save');
+      if (item.kind !== 'pdf' && options.compare) action('compare', 'compare');
+    }
+    if (item.status === 'error' || (item.result && item.stale)) {
+      action('retry', 'retry');
+    }
+    action('remove', '×', true);
   }
 
-  // ------------------------------------------------------------ drag & paste --
+  function renderList(container, files, opts) {
+    container.textContent = '';
+    container.hidden = files.items.length === 0;
+    files.items.forEach(function (item) {
+      container.appendChild(fileRow(item, opts));
+    });
+  }
 
-  function bindDragAndDrop() {
-    var hasFiles = function (event) {
-      var types = event.dataTransfer && event.dataTransfer.types;
-      if (!types) return false;
-      return Array.prototype.indexOf.call(types, 'Files') !== -1;
+  function bindListActions(container, files, opts) {
+    container.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-action]');
+      if (!button) return;
+      var row = button.closest('.file-row');
+      if (!row) return;
+      var item = files.items.find(function (entry) { return entry.id === row.dataset.id; });
+      if (!item) return;
+      var action = button.dataset.action;
+      if (action === 'remove') files.remove(item.id);
+      else if (action === 'up') files.move(item.id, 'up');
+      else if (action === 'down') files.move(item.id, 'down');
+      else if (action === 'save' && item.result) download(item.result.blob, item.result.fileName);
+      else if (action === 'compare') openCompare(item);
+      else if (action === 'retry' && opts.onRetry) opts.onRetry(item);
+    });
+  }
+
+  // ------------------------------------------------------------------ home --
+
+  function renderHome() {
+    document.title = 'OptiPress — local file tools';
+    main.innerHTML =
+      '<section class="home">' +
+        '<p class="privacy-line"><span class="dot" aria-hidden="true"></span>Everything runs in this tab. Your files are never uploaded.</p>' +
+        '<h1 class="hero-title"><span class="prompt">$</span> your files.<br><span class="prompt">$</span> your tab.<br><span class="prompt">$</span> no accounts.<span class="cursor" aria-hidden="true"></span></h1>' +
+        uploaderHtml('home', {
+          accept: 'all',
+          multiple: true,
+          title: 'Select files',
+          sub: 'or drop them here — images, HEIC and PDFs'
+        }) +
+        '<p class="section-label">or open a tool</p>' +
+        toolGroupsHtml() +
+      '</section>';
+
+    bindUploader('home', function (files) {
+      app.pendingFiles = files;
+      location.hash = '#/squeeze';
+    });
+    app.dropHandler = function (files) {
+      app.pendingFiles = files;
+      location.hash = '#/squeeze';
     };
+  }
 
-    window.addEventListener('dragenter', function (event) {
-      if (!hasFiles(event)) return;
-      event.preventDefault();
-      state.dragDepth++;
-      showDropOverlay(true);
+  function toolGroupsHtml() {
+    var groups = [
+      { name: 'images', ids: ['squeeze', 'crop', 'convert'] },
+      { name: 'pdf · organise', ids: ['merge', 'split', 'extract', 'delete', 'reorder', 'rotate'] },
+      { name: 'pdf · convert', ids: ['images-to-pdf', 'pdf-to-images', 'ocr'] },
+      { name: 'pdf · edit', ids: ['compress-pdf', 'watermark', 'page-numbers'] },
+      { name: 'pdf · secure', ids: ['protect', 'unlock'] }
+    ];
+
+    return groups
+      .map(function (group) {
+        var cards = group.ids
+          .map(function (id) {
+            var tool = TOOLS[id];
+            return (
+              '<a class="tool-card" href="#/' + id + '">' +
+                '<span class="tool-name">' + tool.card + '</span>' +
+                '<span class="tool-desc">' + tool.blurb + '</span>' +
+              '</a>'
+            );
+          })
+          .join('');
+        return '<section class="tool-group"><h2>' + group.name + '</h2><div class="cards">' + cards + '</div></section>';
+      })
+      .join('');
+  }
+
+  function renderAbout() {
+    document.title = 'About & privacy — OptiPress';
+    main.innerHTML =
+      '<section class="tool">' +
+        '<a class="back" href="#/">← all tools</a>' +
+        '<p class="eyebrow">about</p>' +
+        '<h1 class="tool-title"><span class="prompt">$</span> about &amp; privacy<span class="cursor" aria-hidden="true"></span></h1>' +
+        '<p class="lede">A small, local-first file workshop. Squeeze, crop, convert, merge and edit — without sending anything to a server.</p>' +
+        '<div class="tool-layout">' +
+          '<div class="col-main">' +
+            '<div class="panel"><h2 class="panel-title">privacy</h2>' +
+              '<p class="hint">Files are decoded, re-encoded and written by this tab. There are no uploads, accounts, analytics or tracking. The app works offline after the first load; OCR downloads an English model from a CDN the first time you use it, but your PDF never leaves the device.</p>' +
+            '</div>' +
+            '<div class="panel"><h2 class="panel-title">quality &amp; limits</h2>' +
+              '<p class="hint">Squeezing reduces quality by design; the estimator encodes a real sample so you can see the trade-off before running. Rasterising a PDF flattens its text into images — use “Keep text” when the PDF must stay selectable. Animated GIFs become a single frame. Password tools use AES-256 and require a modern browser.</p>' +
+            '</div>' +
+            '<div class="panel"><h2 class="panel-title">size presets</h2>' +
+              '<p class="hint">Passport, visa and government-form dimensions and limits are commonly cited values, not legal advice. Requirements change; always confirm with the issuing authority before uploading.</p>' +
+            '</div>' +
+            '<div class="panel"><h2 class="panel-title">credits</h2>' +
+              '<p class="hint">Built with PDF.js, pdf-lib, heic2any, JSZip and Tesseract.js (OCR only). Interface language inspired by <a href="https://pdf.esdy.cc/" rel="noreferrer noopener">Estudely PDF</a>. Type: IBM Plex Mono and Instrument Sans.</p>' +
+            '</div>' +
+          '</div>' +
+          '<aside class="col-side">' +
+            '<div class="panel"><h2 class="panel-title">keyboard</h2>' +
+              '<p class="hint"><code>⌘/Ctrl + Enter</code> runs the current tool.<br><code>Esc</code> closes the compare view.<br>Everything is reachable with <kbd>Tab</kbd>.</p>' +
+            '</div>' +
+          '</aside>' +
+        '</div>' +
+      '</section>';
+  }
+
+  // ------------------------------------------------------------- utilities --
+
+  function acceptAttr(kind) {
+    var images = 'image/png,image/jpeg,image/webp,image/avif,image/gif,image/bmp,image/svg+xml,.heic,.heif,.tif,.tiff,.jxl';
+    if (kind === 'pdf') return '.pdf,application/pdf';
+    if (kind === 'images') return images;
+    return images + ',.pdf,application/pdf';
+  }
+
+  function uploaderHtml(id, options) {
+    var opts = options || {};
+    return (
+      '<input type="file" id="' + id + '-input" accept="' + acceptAttr(opts.accept) + '"' + (opts.multiple ? ' multiple' : '') + ' hidden>' +
+      '<button type="button" class="dropzone' + (opts.compact ? ' compact' : '') + '" id="' + id + '-zone">' +
+        '<span class="legend">· ' + (opts.compact ? 'add files' : 'files') + ' ·</span>' +
+        '<span class="dz-title">' + (opts.title || 'Select files') + '</span>' +
+        '<span class="dz-sub">' + (opts.sub || 'or drop them here') + '</span>' +
+      '</button>'
+    );
+  }
+
+  function bindUploader(id, onFiles) {
+    var input = document.getElementById(id + '-input');
+    var zone = document.getElementById(id + '-zone');
+    if (!input || !zone) return;
+    zone.addEventListener('click', function () {
+      input.click();
     });
+    input.addEventListener('change', function () {
+      if (input.files && input.files.length) onFiles(Array.prototype.slice.call(input.files));
+      input.value = '';
+    });
+    zone.addEventListener('dragover', function (event) {
+      event.preventDefault();
+      zone.classList.add('is-dragover');
+    });
+    zone.addEventListener('dragleave', function () {
+      zone.classList.remove('is-dragover');
+    });
+    zone.addEventListener('drop', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      zone.classList.remove('is-dragover');
+      if (event.dataTransfer && event.dataTransfer.files.length) onFiles(Array.prototype.slice.call(event.dataTransfer.files));
+    });
+  }
 
+  function bindGlobalDrop() {
+    var depth = 0;
+    function hasFiles(event) {
+      var types = event.dataTransfer && event.dataTransfer.types;
+      return types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+    }
+    window.addEventListener('dragenter', function (event) {
+      if (!hasFiles(event) || !app.dropHandler) return;
+      event.preventDefault();
+      depth++;
+      if (dropOverlay) dropOverlay.hidden = false;
+    });
     window.addEventListener('dragover', function (event) {
-      if (!hasFiles(event)) return;
+      if (!hasFiles(event) || !app.dropHandler) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
     });
-
     window.addEventListener('dragleave', function (event) {
       if (!hasFiles(event)) return;
-      state.dragDepth = Math.max(0, state.dragDepth - 1);
-      if (state.dragDepth === 0) showDropOverlay(false);
+      depth = Math.max(0, depth - 1);
+      if (!depth && dropOverlay) dropOverlay.hidden = true;
     });
-
     window.addEventListener('drop', function (event) {
-      if (!hasFiles(event) && !(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length)) return;
+      if (!app.dropHandler) return;
+      if (!(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length)) return;
       event.preventDefault();
-      state.dragDepth = 0;
-      showDropOverlay(false);
-      if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length) {
-        addFiles(event.dataTransfer.files, 'dropped');
-      }
+      depth = 0;
+      if (dropOverlay) dropOverlay.hidden = true;
+      app.dropHandler(Array.prototype.slice.call(event.dataTransfer.files));
     });
-
     window.addEventListener('dragend', function () {
-      state.dragDepth = 0;
-      showDropOverlay(false);
+      depth = 0;
+      if (dropOverlay) dropOverlay.hidden = true;
     });
-  }
-
-  function showDropOverlay(visible) {
-    els.dropOverlay.hidden = !visible;
-    els.dropzone.classList.toggle('is-dragover', visible);
   }
 
   function bindPaste() {
     window.addEventListener('paste', function (event) {
       var target = event.target;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
-      var list = event.clipboardData ? event.clipboardData.files : null;
-      if (list && list.length) {
+      var files = event.clipboardData && event.clipboardData.files;
+      if (files && files.length && app.dropHandler) {
         event.preventDefault();
-        addFiles(list, 'pasted');
+        app.dropHandler(files);
       }
     });
   }
 
-  // ------------------------------------------------------------- utilities ---
+  function toast(message, tone, action) {
+    if (!toasts) return;
+    var el = document.createElement('div');
+    el.className = 'toast' + (tone ? ' is-' + tone : '');
+    var text = document.createElement('span');
+    text.className = 'toast-text';
+    text.textContent = message;
+    el.appendChild(text);
+    if (action && action.label) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'toast-action';
+      button.textContent = action.label;
+      button.addEventListener('click', function () {
+        action.onClick();
+        el.remove();
+      });
+      el.appendChild(button);
+    }
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '×';
+    close.addEventListener('click', function () {
+      el.remove();
+    });
+    el.appendChild(close);
+    toasts.appendChild(el);
+    setTimeout(function () {
+      el.remove();
+    }, action ? 9000 : 5200);
+    while (toasts.children.length > 3) toasts.firstElementChild.remove();
+  }
 
-  function downloadBlob(blob, filename) {
+  function announce(message) {
+    if (!live) return;
+    live.textContent = '';
+    setTimeout(function () {
+      live.textContent = message;
+    }, 30);
+  }
+
+  function download(blob, filename) {
     var url = URL.createObjectURL(blob);
     var anchor = document.createElement('a');
     anchor.href = url;
@@ -1645,34 +909,2251 @@
     }, 10000);
   }
 
-  function toggleTheme() {
-    state.theme = effectiveTheme() === 'dark' ? 'light' : 'dark';
-    safeSet(STORAGE.theme, state.theme);
-    applyTheme();
+  async function zipEntries(entries, onProgress) {
+    if (!window.JSZip) throw new Error('The ZIP library did not load. Reload and try again.');
+    var zip = new window.JSZip();
+    var used = new Set();
+    entries.forEach(function (entry) {
+      var name = C.uniqueName(entry.fileName, used);
+      used.add(name);
+      zip.file(name, entry.blob);
+    });
+    return zip.generateAsync({ type: 'blob', compression: 'STORE' }, function (meta) {
+      if (onProgress) onProgress(meta.percent);
+    });
   }
 
-  function promptInstall() {
-    if (!state.installPrompt) return;
-    state.installPrompt.prompt();
-    state.installPrompt.userChoice.then(function (choice) {
-      if (choice.outcome === 'accepted') {
-        state.installPrompt = null;
-        els.installBtn.hidden = true;
+  function readJSON(key) {
+    var raw = safeGet(key);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function safeGet(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function safeSet(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (err) {
+      /* private mode */
+    }
+  }
+
+  function safelyRemove(key) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch (err) {
+      /* noop */
+    }
+  }
+
+  function normalizeMime(value) {
+    var text = String(value || '').trim().toLowerCase();
+    return /^image\/[a-z0-9.+-]+$/.test(text) ? text : '';
+  }
+
+  function setRangeFill(input) {
+    var min = Number(input.min) || 0;
+    var max = Number(input.max) || 100;
+    var value = Number(input.value) || min;
+    input.style.setProperty('--fill', ((value - min) / (max - min)) * 100 + '%');
+  }
+
+  function toolShell(tool, body) {
+    return (
+      '<section class="tool">' +
+        '<a class="back" href="#/">← all tools</a>' +
+        '<p class="eyebrow">' + tool.group + '</p>' +
+        '<h1 class="tool-title"><span class="prompt">$</span> ' + tool.label + '<span class="cursor" aria-hidden="true"></span></h1>' +
+        '<p class="lede">' + tool.blurb + '</p>' +
+        body +
+      '</section>'
+    );
+  }
+
+  // --------------------------------------------------------- image controls --
+
+  function qualityField(id) {
+    return (
+      '<div class="field">' +
+        '<div class="field-head"><label class="field-label" for="' + id + '">quality</label><span class="value" id="' + id + 'Out">78</span></div>' +
+        '<input type="range" class="range" id="' + id + '" min="5" max="100" step="1" value="78">' +
+        '<div class="range-scale"><span>smaller</span><span>sharper</span></div>' +
+      '</div>'
+    );
+  }
+
+  function formatField(id) {
+    return (
+      '<div class="field">' +
+        '<label class="field-label" for="' + id + '">format</label>' +
+        '<select class="select" id="' + id + '">' +
+          '<option value="auto">auto — webp</option>' +
+          '<option value="original">keep original</option>' +
+          '<option value="image/webp">webp</option>' +
+          '<option value="image/jpeg">jpeg</option>' +
+          '<option value="image/png">png — lossless</option>' +
+          '<option value="image/avif" id="' + id + 'Avif">avif</option>' +
+          '<option value="custom">custom mime…</option>' +
+        '</select>' +
+        '<div id="' + id + 'CustomWrap" hidden>' +
+          '<input class="input mt-8" id="' + id + 'Custom" placeholder="image/jxl" aria-label="Custom output MIME type">' +
+        '</div>' +
+        '<p class="hint" id="' + id + 'Hint"></p>' +
+      '</div>'
+    );
+  }
+
+  function targetField(id) {
+    return (
+      '<div class="field">' +
+        '<div class="field-head"><span class="field-label" id="' + id + 'Label">target size</span>' +
+          '<label class="switch"><input type="checkbox" id="' + id + 'Toggle" aria-labelledby="' + id + 'Label"><span class="switch-track"></span></label>' +
+        '</div>' +
+        '<div id="' + id + 'Body" hidden>' +
+          '<div class="input-row mt-8">' +
+            '<input class="input" type="number" id="' + id + 'KB" min="10" step="10" value="500" aria-label="Target size in kilobytes">' +
+            '<span class="unit-btn">KB</span>' +
+          '</div>' +
+          '<select class="select mt-8" id="' + id + 'Mode" aria-label="Target size behaviour">' +
+            '<option value="exact">exactly — pad if needed</option>' +
+            '<option value="atMost">at most — never exceed</option>' +
+          '</select>' +
+          '<p class="hint mt-8" id="' + id + 'Hint"></p>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function bindQuality(root, id, get, set, onChange) {
+    var input = root.querySelector('#' + id);
+    if (!input) return;
+    var out = root.querySelector('#' + id + 'Out');
+    input.value = String(get());
+    if (out) out.textContent = String(get());
+    setRangeFill(input);
+    input.addEventListener('input', function () {
+      set(Number(input.value));
+      if (out) out.textContent = String(get());
+      setRangeFill(input);
+      saveSettings();
+      if (onChange) onChange();
+    });
+  }
+
+  function bindFormat(root, id, get, set, onChange) {
+    var select = root.querySelector('#' + id);
+    var customWrap = root.querySelector('#' + id + 'CustomWrap');
+    var customInput = root.querySelector('#' + id + 'Custom');
+    var hint = root.querySelector('#' + id + 'Hint');
+    if (!select) return { refresh: function () {} };
+    var avif = root.querySelector('#' + id + 'Avif');
+    if (avif && !E.supportsType('image/avif')) avif.hidden = true;
+    var webp = select.querySelector('option[value="image/webp"]');
+    if (webp && !E.supportsType('image/webp')) webp.disabled = true;
+
+    function refresh() {
+      var format = get();
+      select.value = format === 'custom' ? 'custom' : format;
+      customWrap.hidden = format !== 'custom';
+      var message;
+      var tone = '';
+      if (format === 'custom') {
+        var mime = normalizeMime(customInput.value || get('customMime'));
+        if (!mime) {
+          message = 'Type an image MIME type, for example image/avif.';
+          tone = 'is-error';
+        } else if (!E.supportsType(mime)) {
+          message = 'This browser cannot encode ' + mime + '.';
+          tone = 'is-error';
+        } else {
+          message = 'This browser can encode ' + mime + '.';
+          tone = 'is-ok';
+        }
+      } else if (format === 'image/png') {
+        message = 'Lossless. Browser PNG output is rarely smaller than the source.';
+      } else if (format === 'original') {
+        message = 'Keeps the source format when possible.';
+      } else if (format === 'image/jpeg') {
+        message = 'Universal. Transparency is flattened to the background.';
+      } else if (format === 'image/avif') {
+        message = 'Smallest files, slowest encode.';
+      } else {
+        message = 'WebP is usually 25–35% smaller than JPEG at the same quality.';
+      }
+      hint.textContent = message;
+      hint.className = 'hint' + (tone ? ' ' + tone : '');
+      onChange();
+    }
+
+    select.addEventListener('change', function () {
+      set(select.value === 'custom' ? 'custom' : select.value);
+      if (select.value === 'custom' && !customInput.value) customInput.value = get('customMime') || '';
+      refresh();
+    });
+    customInput.addEventListener('input', function () {
+      set('customMime', normalizeMime(customInput.value));
+      refresh();
+    });
+    customInput.value = get('customMime') || '';
+    refresh();
+
+    return { refresh: refresh };
+  }
+
+  function bindTarget(root, id, get, set, onChange) {
+    var toggle = root.querySelector('#' + id + 'Toggle');
+    var body = root.querySelector('#' + id + 'Body');
+    var kb = root.querySelector('#' + id + 'KB');
+    var mode = root.querySelector('#' + id + 'Mode');
+    var hint = root.querySelector('#' + id + 'Hint');
+    if (!toggle || !body || !kb || !mode) return { refresh: function () {} };
+
+    function refresh() {
+      var enabled = get('targetEnabled');
+      toggle.checked = enabled;
+      body.hidden = !enabled;
+      kb.value = String(get('targetKB'));
+      mode.value = get('targetMode');
+      var bytes = C.kbToBytes(get('targetKB'));
+      hint.textContent = get('targetMode') === 'exact'
+        ? 'Pads with harmless metadata to land exactly on ' + C.formatBytes(bytes) + '. Quality is maxed under the limit first.'
+        : 'Stays at or under ' + C.formatBytes(bytes) + '; never pads.';
+    }
+
+    toggle.addEventListener('change', function () {
+      set('targetEnabled', toggle.checked);
+      refresh();
+      onChange();
+    });
+    kb.addEventListener('input', function () {
+      set('targetKB', Number(kb.value));
+      refresh();
+      onChange();
+    });
+    mode.addEventListener('change', function () {
+      set('targetMode', mode.value);
+      refresh();
+      onChange();
+    });
+    refresh();
+    return { refresh: refresh };
+  }
+
+  function bindScale(root, id, get, set, onChange) {
+    var input = root.querySelector('#' + id);
+    if (!input) return;
+    var out = root.querySelector('#' + id + 'Out');
+    input.value = String(get());
+    out.textContent = get() + '%';
+    setRangeFill(input);
+    input.addEventListener('input', function () {
+      set(Number(input.value));
+      out.textContent = get() + '%';
+      setRangeFill(input);
+      onChange();
+    });
+  }
+
+  // ------------------------------------------------------------ estimation --
+
+  class Estimator {
+    constructor(files, getOptions, onUpdate) {
+      this.files = files;
+      this.getOptions = getOptions;
+      this.onUpdate = onUpdate;
+      this.token = 0;
+      this.timer = null;
+    }
+
+    schedule() {
+      clearTimeout(this.timer);
+      var self = this;
+      this.timer = setTimeout(function () {
+        self.run();
+      }, 260);
+    }
+
+    async run() {
+      var token = ++this.token;
+      var options = this.getOptions();
+      var signature = C.settingsSignature(options);
+      var items = this.files.items.slice();
+      var map = new Map();
+      if (!items.length) {
+        this.onUpdate(map, false);
+        return;
+      }
+      this.onUpdate(map, true);
+
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (token !== this.token) return;
+        if (item.result && !item.stale) {
+          map.set(item.id, item.result.blob.size);
+          continue;
+        }
+        var key = item.id + ':' + signature;
+        if (app.estimateCache.has(key)) {
+          map.set(item.id, app.estimateCache.get(key));
+          this.onUpdate(new Map(map), true);
+          continue;
+        }
+        var bytes = null;
+        if (item.kind === 'pdf') {
+          bytes = E.estimatePdf(item.file, options, item.meta || {});
+        } else if (item.sample && item.meta) {
+          try {
+            var est = await E.estimateImage(
+              item.sample,
+              { width: item.meta.width, height: item.meta.height, hasAlpha: item.hasAlpha, mimeType: item.meta.mimeType },
+              options
+            );
+            if (est) bytes = est.bytes;
+          } catch (err) {
+            bytes = null;
+          }
+        }
+        if (token !== this.token) return;
+        if (bytes != null) {
+          if (item.kind !== 'pdf' && item.kind !== 'heic') {
+            var noResize = options.resizeMode !== 'exact' && (options.resizeMode !== 'scale' || options.scale >= 100);
+            var autoFormat = options.format === 'auto' || options.format === 'original';
+            if (noResize && autoFormat && !options.targetEnabled && bytes > item.size) bytes = item.size;
+          }
+          map.set(item.id, bytes);
+          app.estimateCache.set(key, bytes);
+          if (app.estimateCache.size > 400) app.estimateCache.clear();
+          this.onUpdate(new Map(map), true);
+        }
+      }
+      this.onUpdate(map, false);
+    }
+
+    destroy() {
+      this.token++;
+      clearTimeout(this.timer);
+    }
+  }
+
+  function summaryStats(files, estimates, measuring) {
+    var before = 0;
+    var after = 0;
+    var done = 0;
+    var estimated = 0;
+    var unknown = 0;
+    files.items.forEach(function (item) {
+      before += item.size;
+      var estimate = estimates.get(item.id);
+      if (item.result && !item.stale) {
+        after += item.result.blob.size;
+        done++;
+      } else if (typeof estimate === 'number') {
+        after += estimate;
+        estimated++;
+      } else {
+        after += item.size;
+        unknown++;
+      }
+    });
+    return {
+      total: files.items.length,
+      before: before,
+      after: after,
+      done: done,
+      estimated: estimated,
+      unknown: unknown,
+      measuring: measuring || unknown > 0,
+      savings: C.savingsPercent(before, after)
+    };
+  }
+
+  function updateSummary(container, files, estimates, measuring) {
+    var stats = summaryStats(files, estimates, measuring);
+    var hasMarkup = !!container.querySelector('[data-value]');
+    if (!stats.total || !hasMarkup) {
+      container.innerHTML =
+        '<div class="summary-top"><span class="summary-label">estimated output</span><span class="summary-pill" data-pill>—</span></div>' +
+        '<p class="summary-value" data-value>—</p>' +
+        '<div class="summary-meter"><span data-meter></span></div>' +
+        '<p class="summary-note" data-note>Add files to see a live, measured estimate.</p>';
+      if (!stats.total) return;
+    }
+    var value = container.querySelector('[data-value]');
+    var pill = container.querySelector('[data-pill]');
+    var meter = container.querySelector('[data-meter]');
+    var note = container.querySelector('[data-note]');
+    var allDone = stats.done === stats.total;
+    var nothingYet = !allDone && stats.done === 0 && stats.estimated === 0;
+
+    if (nothingYet) {
+      value.textContent = '—';
+      pill.textContent = 'measuring';
+      pill.className = 'summary-pill';
+      meter.style.width = '0%';
+      note.textContent = 'Measuring your files here — nothing is uploaded.';
+      return;
+    }
+
+    value.textContent = (allDone ? '' : '≈ ') + C.formatBytes(stats.after);
+    pill.textContent = (stats.savings >= 0 ? '−' : '+') + Math.abs(stats.savings) + '%';
+    pill.className = 'summary-pill' + (stats.savings < 0 ? ' is-negative' : '');
+    meter.style.width = Math.max(0, Math.min(100, stats.savings)) + '%';
+
+    if (allDone) {
+      note.textContent = stats.total + ' of ' + stats.total + ' done · saves ' + C.formatBytes(Math.max(0, stats.before - stats.after));
+    } else if (stats.done) {
+      note.textContent = stats.done + ' done · estimate for the rest';
+    } else if (stats.measuring) {
+      note.textContent = 'Measured ' + stats.estimated + ' of ' + stats.total + ' · still measuring';
+    } else {
+      note.textContent = 'Measured estimate · run to confirm';
+    }
+    if (stats.savings < 0) note.textContent += ' · output is larger';
+  }
+
+  // --------------------------------------------------------- image engines --
+
+  function markStale(files) {
+    files.items.forEach(function (item) {
+      if (item.result) item.stale = true;
+    });
+  }
+
+  function pendingItems(files) {
+    return files.items.filter(function (item) {
+      return !item.result || item.stale;
+    });
+  }
+
+  function canRunImages(files, options, requireSupportedCustom) {
+    if (!files.items.length) return false;
+    if (requireSupportedCustom && options.format === 'custom') {
+      if (!options.customMime || !E.supportsType(options.customMime)) return false;
+    }
+    return true;
+  }
+
+  async function processImageItems(files, options, listEl, onItem, specific) {
+    var targets = specific && specific.length ? specific : pendingItems(files);
+    if (!targets.length) return [];
+    var cursor = 0;
+    var lanes = Math.min(2, targets.length);
+
+    async function worker() {
+      while (cursor < targets.length) {
+        var item = targets[cursor++];
+        if (!files.items.includes(item)) continue;
+        item.status = 'processing';
+        item.progress = 2;
+        item.stage = 'preparing';
+        item.error = null;
+        item.stale = false;
+        item.result = null;
+        item.note = '';
+        onItem(item, 'start');
+        try {
+          var result = await E.compress(
+            item.prepared || item.file,
+            options,
+            function (percent, label) {
+              if (!files.items.includes(item)) return;
+              item.progress = Math.max(item.progress, Math.min(100, Number(percent) || 0));
+              item.stage = label || '';
+              var row = listEl.querySelector('[data-id="' + item.id + '"]');
+              if (row) updateRow(item, row);
+            },
+            {
+              kind: item.kind,
+              originalName: item.name,
+              prepared: item.prepared,
+              mimeType: item.meta && item.meta.mimeType
+            }
+          );
+          if (!files.items.includes(item)) continue;
+          item.status = 'done';
+          item.progress = 100;
+          item.result = result;
+          item.note = result.note || '';
+        } catch (err) {
+          item.status = 'error';
+          item.progress = 0;
+          item.result = null;
+          item.error = err && err.message ? err.message : 'Compression failed.';
+        }
+        onItem(item, 'end');
+      }
+    }
+
+    var workers = [];
+    for (var i = 0; i < lanes; i++) workers.push(worker());
+    await Promise.all(workers);
+    return targets;
+  }
+
+  function imageResultEntries(files) {
+    return files.items
+      .filter(function (item) { return item.result; })
+      .map(function (item) {
+        return { blob: item.result.blob, fileName: item.result.fileName, item: item };
+      });
+  }
+
+  function showImageResults(zone, files, label) {
+    var entries = imageResultEntries(files).filter(function (entry) { return !entry.item.stale; });
+    zone.textContent = '';
+    if (!entries.length) return;
+
+    var totalBefore = entries.reduce(function (sum, entry) { return sum + entry.item.size; }, 0);
+    var totalAfter = entries.reduce(function (sum, entry) { return sum + entry.blob.size; }, 0);
+    var saved = Math.max(0, totalBefore - totalAfter);
+
+    var box = document.createElement('div');
+    box.className = 'result';
+    var name = document.createElement('p');
+    name.className = 'result-name';
+    name.textContent = entries.length === 1 ? entries[0].fileName : entries.length + ' ' + label;
+    var meta = document.createElement('p');
+    meta.className = 'result-meta';
+    meta.textContent = C.formatBytes(totalBefore) + ' → ' + C.formatBytes(totalAfter) + ' · saves ' + C.formatBytes(saved);
+    var actions = document.createElement('div');
+    actions.className = 'result-actions';
+
+    if (entries.length === 1) {
+      var save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'btn btn-primary';
+      save.textContent = 'download';
+      save.addEventListener('click', function () {
+        download(entries[0].blob, entries[0].fileName);
+      });
+      actions.appendChild(save);
+    } else {
+      var zip = document.createElement('button');
+      zip.type = 'button';
+      zip.className = 'btn btn-primary';
+      zip.textContent = 'download zip (' + entries.length + ')';
+      zip.addEventListener('click', async function () {
+        zip.disabled = true;
+        var original = zip.textContent;
+        try {
+          var blob = await zipEntries(entries, function (percent) {
+            zip.textContent = 'zip ' + Math.round(percent) + '%';
+          });
+          download(blob, 'optipress-' + Date.now() + '.zip');
+          toast('ZIP downloaded.', 'ok');
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          zip.disabled = false;
+          zip.textContent = original;
+        }
+      });
+      actions.appendChild(zip);
+    }
+
+    box.appendChild(name);
+    box.appendChild(meta);
+    box.appendChild(actions);
+    zone.appendChild(box);
+  }
+
+  function imageRunLabel(label, files) {
+    var pending = pendingItems(files).length;
+    if (!files.items.length) return label;
+    if (!pending) return 'all done';
+    return label + ' ' + pending + (pending === 1 ? ' file' : ' files');
+  }
+
+  // ---------------------------------------------------------- image views --
+
+  function renderSqueeze(tool) {
+    var settings = app.settings;
+    main.innerHTML = toolShell(
+      tool,
+      '<div class="tool-layout">' +
+        '<div class="col-main">' +
+          uploaderHtml('files', { accept: 'all', multiple: true, title: 'Select files', sub: 'images, HEIC and PDFs · up to 200 MB each' }) +
+          '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div id="resultZone"></div>' +
+        '</div>' +
+        '<aside class="col-side">' +
+          '<div class="panel" id="imagePanel">' +
+            '<h2 class="panel-title">image output</h2>' +
+            qualityField('quality') +
+            formatField('format') +
+            '<div class="field"><div class="field-head"><label class="field-label" for="scale">resize</label><span class="value" id="scaleOut">100%</span></div>' +
+              '<input type="range" class="range" id="scale" min="20" max="100" step="5" value="100">' +
+              '<div class="range-scale"><span>20%</span><span>100%</span></div>' +
+            '</div>' +
+            targetField('target') +
+          '</div>' +
+          '<div class="panel" id="pdfPanel" hidden>' +
+            '<h2 class="panel-title">pdf output</h2>' +
+            '<div class="field"><label class="field-label" for="pdfMode">engine</label>' +
+              '<select class="select" id="pdfMode">' +
+                '<option value="raster">rasterise — smallest</option>' +
+                '<option value="structure">keep text selectable</option>' +
+              '</select>' +
+              '<p class="hint" id="pdfHint"></p>' +
+            '</div>' +
+            '<div class="field" id="pdfDpiField"><label class="field-label" for="pdfDpi">page resolution</label>' +
+              '<select class="select" id="pdfDpi">' +
+                '<option value="72">72 dpi — email</option>' +
+                '<option value="150">150 dpi — screen</option>' +
+                '<option value="200">200 dpi — detail</option>' +
+                '<option value="300">300 dpi — print</option>' +
+              '</select>' +
+            '</div>' +
+          '</div>' +
+          '<div class="summary" id="summary"></div>' +
+          '<div class="run-bar">' +
+            '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>squeeze</button>' +
+            '<div class="run-status"><span class="bar"><i id="runBar"></i></span><span id="runStatus">ready</span></div>' +
+          '</div>' +
+        '</aside>' +
+      '</div>'
+    );
+    mountImageTool({
+      files: new Files({ accept: 'all', multiple: true, onChange: null }),
+      options: function () { return engineOptions(); },
+      actionLabel: 'squeeze',
+      requireSupportedCustom: true
+    });
+    document.title = 'Squeeze — OptiPress';
+  }
+
+  function renderCrop(tool) {
+    var settings = app.settings;
+    main.innerHTML = toolShell(
+      tool,
+      '<div class="tool-layout">' +
+        '<div class="col-main">' +
+          uploaderHtml('files', { accept: 'images', multiple: true, title: 'Select images', sub: 'or drop them here' }) +
+          '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div class="panel" id="previewPanel">' +
+            '<h2 class="panel-title">preview · first image</h2>' +
+            '<div class="preview" id="preview"><div class="preview-empty" id="previewEmpty">add an image to preview</div><canvas id="previewCanvas" hidden></canvas></div>' +
+            '<p class="hint mt-8" id="previewNote"></p>' +
+          '</div>' +
+          '<div id="resultZone"></div>' +
+        '</div>' +
+        '<aside class="col-side">' +
+          '<div class="panel">' +
+            '<h2 class="panel-title">crop &amp; size</h2>' +
+            '<div class="field"><label class="field-label" for="preset">preset</label>' +
+              '<select class="select" id="preset"></select>' +
+              '<p class="hint" id="presetNote"></p>' +
+            '</div>' +
+            '<div class="field"><span class="field-label">size</span>' +
+              '<div class="input-row">' +
+                '<input class="input" type="number" id="cropW" min="1" max="20000" placeholder="width" aria-label="Width in pixels">' +
+                '<input class="input" type="number" id="cropH" min="1" max="20000" placeholder="height" aria-label="Height in pixels">' +
+              '</div>' +
+              '<p class="hint" id="sizeHint"></p>' +
+            '</div>' +
+            '<div class="field"><span class="field-label">framing</span>' +
+              '<div class="seg" id="fitSeg"><button type="button" data-fit="fill">crop to fill</button><button type="button" data-fit="fit">fit inside</button></div>' +
+              '<div class="anchors" id="anchors" role="group" aria-label="Crop anchor">' +
+                ['top-left','top','top-right','left','center','right','bottom-left','bottom','bottom-right'].map(function (anchor) {
+                  return '<button type="button" data-anchor="' + anchor + '" aria-label="Anchor ' + anchor.replace('-', ' ') + '"></button>';
+                }).join('') +
+              '</div>' +
+            '</div>' +
+            '<div class="field"><span class="field-label">background</span>' +
+              '<div class="seg" id="bgSeg"><button type="button" data-bg="white">white</button><button type="button" data-bg="black">black</button><button type="button" data-bg="transparent">none</button></div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="panel">' +
+            '<h2 class="panel-title">output</h2>' +
+            qualityField('quality') +
+            formatField('format') +
+            targetField('target') +
+          '</div>' +
+          '<div class="summary" id="summary"></div>' +
+          '<div class="run-bar">' +
+            '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>crop &amp; squeeze</button>' +
+            '<div class="run-status"><span class="bar"><i id="runBar"></i></span><span id="runStatus">ready</span></div>' +
+          '</div>' +
+        '</aside>' +
+      '</div>'
+    );
+    fillPresetSelect();
+    mountImageTool({
+      files: new Files({ accept: 'images', multiple: true, onChange: null }),
+      options: function () {
+        return engineOptions({
+          resizeMode: 'exact',
+          customWidth: app.settings.cropWidth,
+          customHeight: app.settings.cropHeight,
+          fitMode: app.settings.fitMode,
+          anchor: app.settings.anchor,
+          background: app.settings.background
+        });
+      },
+      actionLabel: 'crop & squeeze',
+      requireSupportedCustom: true,
+      crop: true
+    });
+    document.title = 'Crop & size — OptiPress';
+  }
+
+  function renderConvert(tool) {
+    main.innerHTML = toolShell(
+      tool,
+      '<div class="tool-layout">' +
+        '<div class="col-main">' +
+          uploaderHtml('files', { accept: 'images', multiple: true, title: 'Select images', sub: 'or drop them here' }) +
+          '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div id="resultZone"></div>' +
+        '</div>' +
+        '<aside class="col-side">' +
+          '<div class="panel">' +
+            '<h2 class="panel-title">convert</h2>' +
+            formatField('format') +
+            qualityField('quality') +
+            '<div class="field"><div class="field-head"><label class="field-label" for="scale">scale</label><span class="value" id="scaleOut">100%</span></div>' +
+              '<input type="range" class="range" id="scale" min="20" max="100" step="5" value="100">' +
+              '<div class="range-scale"><span>20%</span><span>100%</span></div></div>' +
+            targetField('target') +
+          '</div>' +
+          '<div class="summary" id="summary"></div>' +
+          '<div class="run-bar">' +
+            '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>convert</button>' +
+            '<div class="run-status"><span class="bar"><i id="runBar"></i></span><span id="runStatus">ready</span></div>' +
+          '</div>' +
+        '</aside>' +
+      '</div>'
+    );
+    mountImageTool({
+      files: new Files({ accept: 'images', multiple: true, onChange: null }),
+      options: function () { return engineOptions(); },
+      actionLabel: 'convert',
+      requireSupportedCustom: true
+    });
+    document.title = 'Convert — OptiPress';
+  }
+
+  function renderCompressPdf(tool) {
+    main.innerHTML = toolShell(
+      tool,
+      '<div class="tool-layout">' +
+        '<div class="col-main">' +
+          uploaderHtml('files', { accept: 'pdf', multiple: true, title: 'Select PDFs', sub: 'or drop them here' }) +
+          '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div id="resultZone"></div>' +
+        '</div>' +
+        '<aside class="col-side">' +
+          '<div class="panel">' +
+            '<h2 class="panel-title">pdf output</h2>' +
+            '<div class="field"><label class="field-label" for="pdfMode">engine</label>' +
+              '<select class="select" id="pdfMode"><option value="raster">rasterise — smallest</option><option value="structure">keep text selectable</option></select>' +
+              '<p class="hint" id="pdfHint"></p>' +
+            '</div>' +
+            '<div class="field" id="pdfDpiField"><label class="field-label" for="pdfDpi">page resolution</label>' +
+              '<select class="select" id="pdfDpi"><option value="72">72 dpi</option><option value="150">150 dpi</option><option value="200">200 dpi</option><option value="300">300 dpi</option></select>' +
+            '</div>' +
+            qualityField('quality') +
+          '</div>' +
+          '<div class="summary" id="summary"></div>' +
+          '<div class="run-bar">' +
+            '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>compress</button>' +
+            '<div class="run-status"><span class="bar"><i id="runBar"></i></span><span id="runStatus">ready</span></div>' +
+          '</div>' +
+        '</aside>' +
+      '</div>'
+    );
+    mountImageTool({
+      files: new Files({ accept: 'pdf', multiple: true, onChange: null }),
+      options: function () { return engineOptions({ format: 'auto', targetEnabled: false }); },
+      actionLabel: 'compress'
+    });
+    document.title = 'Compress PDF — OptiPress';
+  }
+
+  // ---------------------------------------------------- image tool mounting --
+
+  function mountImageTool(config) {
+    var files = config.files;
+    var list = main.querySelector('#fileList');
+    var summary = main.querySelector('#summary');
+    var runBtn = main.querySelector('#runBtn');
+    var runBar = main.querySelector('#runBar');
+    var runStatus = main.querySelector('#runStatus');
+    var resultZone = main.querySelector('#resultZone');
+    var root = main;
+    var estimates = new Map();
+    var measuring = false;
+
+    var estimator = new Estimator(files, config.options, function (map, isMeasuring) {
+      estimates = map;
+      measuring = isMeasuring;
+      updateSummary(summary, files, estimates, measuring);
+    });
+
+    function refresh() {
+      renderList(list, files, {
+        reorder: false,
+        compare: true,
+        onRetry: function (item) {
+          runItems([item]);
+        }
+      });
+      updateSummary(summary, files, estimates, measuring);
+      showImageResults(resultZone, files, 'files');
+      updateRun();
+    }
+
+    files.onChange = function (type) {
+      if (type === 'structure') {
+        refresh();
+        estimator.schedule();
+        syncPanels();
+      } else if (type === 'probe') {
+        refresh();
+        estimator.schedule();
+        updatePreview();
+      }
+    };
+
+    function updateRun() {
+      var pending = pendingItems(files).length;
+      var options = config.options();
+      var ok = canRunImages(files, options, config.requireSupportedCustom);
+      runBtn.disabled = app.busy || !ok || pending === 0;
+      runBtn.textContent = app.busy ? 'working…' : imageRunLabel(config.actionLabel, files);
+      if (!files.items.length) runBtn.textContent = config.actionLabel;
+      if (ok && files.items.length && pending === 0) runBtn.textContent = 'all done';
+    }
+
+    function syncPanels() {
+      var hasPdf = files.items.some(function (item) { return item.kind === 'pdf'; });
+      var hasImage = files.items.some(function (item) { return item.kind !== 'pdf'; });
+      var pdfPanel = main.querySelector('#pdfPanel');
+      var imagePanel = main.querySelector('#imagePanel');
+      if (pdfPanel) pdfPanel.hidden = !hasPdf;
+      if (imagePanel) imagePanel.hidden = files.items.length > 0 && !hasImage;
+    }
+
+    async function runItems(specific) {
+      if (app.busy) return;
+      var options = config.options();
+      if (config.requireSupportedCustom && options.format === 'custom' && (!options.customMime || !E.supportsType(options.customMime))) {
+        toast('This browser cannot encode that custom type.', 'error');
+        return;
+      }
+      app.busy = true;
+      runBtn.disabled = true;
+      runBtn.textContent = 'working…';
+      runBar.style.width = '0%';
+      runStatus.textContent = 'starting';
+      resultZone.textContent = '';
+      var targets = specific ? (Array.isArray(specific) ? specific : [specific]) : pendingItems(files);
+      targets.forEach(function (item) { item.stale = false; });
+      renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
+      estimator.destroy();
+
+      try {
+        await processImageItems(files, options, list, function (item, phase) {
+          if (phase === 'start') {
+            runStatus.textContent = 'compressing ' + item.name;
+          } else {
+            runStatus.textContent = item.status === 'done' ? 'done · ' + item.name : 'failed · ' + item.name;
+            renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
+            updateSummary(summary, files, estimates, measuring);
+          }
+        });
+
+        var done = files.items.filter(function (item) { return item.status === 'done'; });
+        var failed = files.items.filter(function (item) { return item.status === 'error'; });
+        runBar.style.width = '100%';
+        runStatus.textContent = done.length + ' done' + (failed.length ? ' · ' + failed.length + ' failed' : '');
+        renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
+        showImageResults(resultZone, files, 'files');
+        updateSummary(summary, files, estimates, measuring);
+        if (done.length) {
+          toast(done.length + ' file' + (done.length === 1 ? '' : 's') + ' done.', 'ok');
+          announce(done.length + ' files processed.');
+        }
+        if (failed.length) toast(failed.length + ' failed — see the rows.', 'error');
+      } catch (err) {
+        runStatus.textContent = 'failed';
+        toast(err && err.message ? err.message : 'Something went wrong.', 'error');
+      } finally {
+        app.busy = false;
+        estimator = new Estimator(files, config.options, function (map, isMeasuring) {
+          estimates = map;
+          measuring = isMeasuring;
+          updateSummary(summary, files, estimates, measuring);
+        });
+        estimator.schedule();
+        updateRun();
+      }
+    }
+
+    bindListActions(list, files, {
+      reorder: false,
+      compare: true,
+      onRetry: function (item) { runItems([item]); }
+    });
+
+    runBtn.addEventListener('click', function () {
+      runItems();
+    });
+
+    // settings
+    bindQuality(
+      root,
+      'quality',
+      function () { return app.settings.quality; },
+      function (value) {
+        updateSettings({ quality: value, presetId: 'custom' });
+      },
+      function () {
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updateRun();
+      }
+    );
+
+    var formatBinder = bindFormat(
+      root,
+      'format',
+      function (key) { return key ? app.settings[key] : app.settings.format; },
+      function (key, value) {
+        if (key === 'customMime') updateSettings({ customMime: value });
+        else updateSettings({ format: key });
+      },
+      function () {
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updateRun();
+      }
+    );
+
+    bindTarget(
+      root,
+      'target',
+      function (key) { return app.settings[key]; },
+      function (key, value) { updateSettings({ [key]: value }); },
+      function () {
+        markStale(files);
+        refresh();
+        estimator.schedule();
+      }
+    );
+
+    var scaleInput = root.querySelector('#scale');
+    if (scaleInput) {
+      bindScale(
+        root,
+        'scale',
+        function () { return app.settings.scale; },
+        function (value) {
+          updateSettings({ scale: value });
+        },
+        function () {
+          markStale(files);
+          refresh();
+          estimator.schedule();
+          updateRun();
+        }
+      );
+    }
+
+    var pdfMode = root.querySelector('#pdfMode');
+    if (pdfMode) {
+      pdfMode.value = app.settings.pdfMode;
+      var pdfDpi = root.querySelector('#pdfDpi');
+      pdfDpi.value = String(app.settings.pdfDpi);
+      var pdfHint = root.querySelector('#pdfHint');
+      var pdfDpiField = root.querySelector('#pdfDpiField');
+      function syncPdf() {
+        pdfDpiField.hidden = pdfMode.value === 'structure';
+        pdfHint.textContent = pdfMode.value === 'structure'
+          ? 'Re-saves the document structure and keeps text selectable. Savings are modest.'
+          : 'Rasterises pages to images. Text becomes non-selectable.';
+      }
+      pdfMode.addEventListener('change', function () {
+        updateSettings({ pdfMode: pdfMode.value });
+        syncPdf();
+        markStale(files);
+        refresh();
+        estimator.schedule();
+      });
+      pdfDpi.addEventListener('change', function () {
+        updateSettings({ pdfDpi: Number(pdfDpi.value) });
+        markStale(files);
+        refresh();
+        estimator.schedule();
+      });
+      syncPdf();
+    }
+
+    var presetSelect = root.querySelector('#preset');
+    if (presetSelect) {
+      presetSelect.addEventListener('change', function () {
+        var preset = Presets.byId(presetSelect.value);
+        if (!preset) {
+          updateSettings({ presetId: 'custom' });
+          syncCropControls();
+          return;
+        }
+        applyPreset(preset);
+      });
+      var cropW = root.querySelector('#cropW');
+      var cropH = root.querySelector('#cropH');
+      cropW.addEventListener('input', function () {
+        updateSettings({ presetId: 'custom', cropWidth: cropW.value });
+        syncCropControls();
+      });
+      cropH.addEventListener('input', function () {
+        updateSettings({ presetId: 'custom', cropHeight: cropH.value });
+        syncCropControls();
+      });
+      root.querySelector('#fitSeg').addEventListener('click', function (event) {
+        var button = event.target.closest('[data-fit]');
+        if (!button) return;
+        updateSettings({ fitMode: button.dataset.fit, presetId: 'custom' });
+        syncCropControls();
+      });
+      root.querySelector('#anchors').addEventListener('click', function (event) {
+        var button = event.target.closest('[data-anchor]');
+        if (!button) return;
+        updateSettings({ anchor: button.dataset.anchor });
+        syncCropControls();
+      });
+      root.querySelector('#bgSeg').addEventListener('click', function (event) {
+        var button = event.target.closest('[data-bg]');
+        if (!button) return;
+        updateSettings({ background: button.dataset.bg, presetId: 'custom' });
+        syncCropControls();
+      });
+      syncCropControls();
+    }
+
+    function applyPreset(preset) {
+      updateSettings({
+        presetId: preset.id,
+        cropWidth: preset.width,
+        cropHeight: preset.height,
+        fitMode: preset.fit,
+        background: preset.background,
+        targetEnabled: !!preset.maxKB,
+        targetMode: 'atMost',
+        targetKB: preset.maxKB || app.settings.targetKB
+      });
+      bindTargetRefresh();
+      syncCropControls();
+      toast(preset.label + ' preset applied.', 'ok');
+    }
+
+    function bindTargetRefresh() {
+      var toggle = root.querySelector('#targetToggle');
+      var body = root.querySelector('#targetBody');
+      var kb = root.querySelector('#targetKB');
+      var mode = root.querySelector('#targetMode');
+      var hint = root.querySelector('#targetHint');
+      if (!toggle) return;
+      toggle.checked = app.settings.targetEnabled;
+      body.hidden = !app.settings.targetEnabled;
+      kb.value = String(app.settings.targetKB);
+      mode.value = app.settings.targetMode;
+      hint.textContent = app.settings.targetMode === 'exact'
+        ? 'Pads with harmless metadata to land exactly on ' + C.formatBytes(C.kbToBytes(app.settings.targetKB)) + '.'
+        : 'Stays at or under ' + C.formatBytes(C.kbToBytes(app.settings.targetKB)) + '.';
+    }
+
+    function syncCropControls() {
+      var s = app.settings;
+      var preset = Presets.byId(s.presetId);
+      presetSelect.value = preset ? preset.id : 'custom';
+      root.querySelector('#cropW').value = s.cropWidth || '';
+      root.querySelector('#cropH').value = s.cropHeight || '';
+      root.querySelector('#presetNote').textContent = preset
+        ? (preset.detail || '') + ' — commonly cited; confirm with the authority.'
+        : 'Custom size. Crop to fill removes edges; fit inside adds a border.';
+      root.querySelectorAll('#fitSeg [data-fit]').forEach(function (button) {
+        var active = button.dataset.fit === s.fitMode;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      root.querySelectorAll('#anchors [data-anchor]').forEach(function (button) {
+        var active = button.dataset.anchor === s.anchor;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      root.querySelectorAll('#bgSeg [data-bg]').forEach(function (button) {
+        var active = button.dataset.bg === s.background;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+      var w = C.toPositiveInt(s.cropWidth);
+      var h = C.toPositiveInt(s.cropHeight);
+      var hint = root.querySelector('#sizeHint');
+      if (w && h) {
+        var ratio = (w / h).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+        hint.textContent = w + ' × ' + h + ' px · ratio ' + ratio;
+      } else {
+        hint.textContent = 'Leave blank to keep the original dimensions.';
+      }
+      markStale(files);
+      refresh();
+      estimator.schedule();
+      updatePreview();
+      updateRun();
+    }
+
+    // crop preview
+    function updatePreview() {
+      var canvas = root.querySelector('#previewCanvas');
+      if (!canvas) return;
+      var empty = root.querySelector('#previewEmpty');
+      var note = root.querySelector('#previewNote');
+      var item = files.items.find(function (entry) { return entry.sample && entry.meta; });
+      if (!item) {
+        canvas.hidden = true;
+        empty.hidden = false;
+        note.textContent = '';
+        var resetWrap = root.querySelector('#preview');
+        if (resetWrap) resetWrap.classList.remove('is-alpha');
+        return;
+      }
+      var s = app.settings;
+      var w = C.toPositiveInt(s.cropWidth) || item.meta.width;
+      var h = C.toPositiveInt(s.cropHeight) || item.meta.height;
+      var max = 520;
+      var scale = Math.min(1, max / Math.max(w, h));
+      canvas.width = Math.max(24, Math.round(w * scale));
+      canvas.height = Math.max(24, Math.round(h * scale));
+      var ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      var background = s.background;
+      if (background !== 'transparent') {
+        ctx.fillStyle = background === 'black' ? '#000000' : '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      var geom = C.computeCropRect(item.sample.width, item.sample.height, canvas.width, canvas.height, s.fitMode, s.anchor);
+      if (geom.mode === 'fill') {
+        ctx.drawImage(item.sample, geom.sx, geom.sy, geom.sWidth, geom.sHeight, 0, 0, canvas.width, canvas.height);
+      } else {
+        ctx.drawImage(item.sample, geom.dx, geom.dy, geom.dWidth, geom.dHeight);
+      }
+      canvas.hidden = false;
+      empty.hidden = true;
+      var wrap = root.querySelector('#preview');
+      if (wrap) wrap.classList.toggle('is-alpha', background === 'transparent');
+      note.textContent = 'preview · first image · output ' + w + '×' + h + ' px';
+    }
+
+    // label sync for quality etc.
+    function syncLabels() {
+      var quality = root.querySelector('#quality');
+      var out = root.querySelector('#qualityOut');
+      if (quality) {
+        quality.value = String(app.settings.quality);
+        out.textContent = String(app.settings.quality);
+        setRangeFill(quality);
+      }
+      var scaleEl = root.querySelector('#scale');
+      if (scaleEl) {
+        scaleEl.value = String(app.settings.scale);
+        root.querySelector('#scaleOut').textContent = app.settings.scale + '%';
+        setRangeFill(scaleEl);
+      }
+      formatBinder.refresh();
+      bindTargetRefresh();
+      syncCropControls();
+    }
+
+    // initial state
+    if (config.crop) {
+      syncCropControls();
+      updatePreview();
+    }
+    bindUploader('files', function (selected) {
+      files.add(selected);
+      syncPanels();
+      updatePreview();
+    });
+    app.dropHandler = function (selected) {
+      files.add(selected);
+      syncPanels();
+      updatePreview();
+    };
+    files.notify('structure');
+    // apply persisted values without marking stale
+    if (root.querySelector('#quality')) {
+      root.querySelector('#quality').value = String(app.settings.quality);
+      root.querySelector('#qualityOut').textContent = String(app.settings.quality);
+      setRangeFill(root.querySelector('#quality'));
+    }
+    if (!config.crop) {
+      bindTargetRefresh();
+    }
+    updateRun();
+    if (app.pendingFiles) {
+      var pending = app.pendingFiles;
+      app.pendingFiles = null;
+      files.add(pending);
+      syncPanels();
+    }
+    onCleanup(function () {
+      estimator.destroy();
+      files.cleanup();
+    });
+  }
+
+  // ------------------------------------------------------------- pdf views --
+
+  function pdfLayout(tool, options) {
+    var opts = options || {};
+    main.innerHTML = toolShell(
+      tool,
+      '<div class="tool-layout">' +
+        '<div class="col-main">' +
+          uploaderHtml('files', {
+            accept: opts.accept || 'pdf',
+            multiple: !!opts.multiple,
+            title: opts.title || (opts.accept === 'images' ? 'Select images' : 'Select a PDF'),
+            sub: opts.sub || 'or drop it here'
+          }) +
+          '<div class="notice" id="toolNotice" hidden></div>' +
+          '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div id="resultZone"></div>' +
+        '</div>' +
+        '<aside class="col-side">' +
+          '<div class="panel" id="sidePanel">' + (opts.side || '') + '</div>' +
+          '<div class="run-bar">' +
+            '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>' + (opts.action || 'run') + '</button>' +
+            '<div class="run-status"><span class="bar"><i id="runBar"></i></span><span id="runStatus">ready</span></div>' +
+          '</div>' +
+        '</aside>' +
+      '</div>'
+    );
+  }
+
+  function mountPdfTool(tool, config) {
+    var files = new Files({
+      accept: config.accept || 'pdf',
+      multiple: !!config.multiple,
+      probeMode: config.probeMode || 'auto',
+      max: config.max || 40,
+      onChange: null
+    });
+    var list = main.querySelector('#fileList');
+    var resultZone = main.querySelector('#resultZone');
+    var runBtn = main.querySelector('#runBtn');
+    var runBar = main.querySelector('#runBar');
+    var runStatus = main.querySelector('#runStatus');
+    var notice = main.querySelector('#toolNotice');
+    var ctx = {
+      files: files,
+      root: main,
+      notice: notice,
+      setNotice: function (message, warn) {
+        if (!notice) return;
+        notice.hidden = !message;
+        notice.textContent = message || '';
+        notice.className = 'notice' + (warn ? ' is-warn' : '');
+      },
+      render: function () {
+        renderList(list, files, { reorder: !!config.multiple, compare: false, onRetry: null });
+        updateRun();
+        if (config.onChange) config.onChange(ctx);
+      },
+      setProgress: function (percent, label) {
+        runBar.style.width = Math.max(0, Math.min(100, percent)) + '%';
+        if (label) runStatus.textContent = label;
+      },
+      showResult: function (entries, label) {
+        showPdfResults(resultZone, entries, label);
+      },
+      showError: function (message) {
+        resultZone.textContent = '';
+        var box = document.createElement('div');
+        box.className = 'notice is-warn';
+        box.textContent = message;
+        resultZone.appendChild(box);
+        toast(message, 'error');
+      },
+      setBusy: function (busy) {
+        app.busy = busy;
+        runBtn.disabled = busy;
+        runBtn.textContent = busy ? 'working…' : config.action;
+        if (!busy) updateRun();
+      },
+      pages: function () {
+        var item = files.items[0];
+        return item && item.meta && item.meta.pages ? item.meta.pages : 0;
+      }
+    };
+
+    function updateRun() {
+      if (app.busy) return;
+      runBtn.disabled = !files.items.length || (config.canRun ? !config.canRun(ctx) : false);
+      runBtn.textContent = config.action;
+    }
+
+    files.onChange = function (type) {
+      ctx.render();
+    };
+
+    bindListActions(list, files, { reorder: !!config.multiple, compare: false, onRetry: null });
+    bindUploader('files', function (selected) {
+      files.add(selected);
+    });
+    app.dropHandler = function (selected) {
+      files.add(selected);
+    };
+
+    runBtn.addEventListener('click', async function () {
+      if (app.busy) return;
+      var valid = config.validate ? config.validate(ctx) : true;
+      if (valid === false) return;
+      if (typeof valid === 'string') {
+        ctx.showError(valid);
+        return;
+      }
+      ctx.setBusy(true);
+      runBar.style.width = '0%';
+      runStatus.textContent = 'starting';
+      resultZone.textContent = '';
+      try {
+        var entries = await config.run(ctx, function (percent, label) {
+          ctx.setProgress(percent, label);
+        });
+        if (!entries || !entries.length) throw new Error('Nothing was produced.');
+        ctx.setProgress(100, 'done');
+        ctx.showResult(entries, config.resultLabel || 'file');
+        toast((entries.length > 1 ? entries.length + ' files' : entries[0].fileName) + ' ready.', 'ok');
+        announce('File ready.');
+      } catch (err) {
+        ctx.showError(err && err.message ? err.message : 'Something went wrong.');
+        runStatus.textContent = 'failed';
+      } finally {
+        ctx.setBusy(false);
+      }
+    });
+
+    if (config.mount) config.mount(ctx);
+    if (app.pendingFiles) {
+      var pending = app.pendingFiles;
+      app.pendingFiles = null;
+      files.add(pending);
+    }
+    ctx.render();
+    onCleanup(function () {
+      files.cleanup();
+    });
+    return ctx;
+  }
+
+  function showPdfResults(zone, entries, label) {
+    zone.textContent = '';
+    var box = document.createElement('div');
+    box.className = 'result';
+    var name = document.createElement('p');
+    name.className = 'result-name';
+    name.textContent = entries.length === 1 ? entries[0].fileName : entries.length + ' ' + label;
+    var meta = document.createElement('p');
+    meta.className = 'result-meta';
+    var total = entries.reduce(function (sum, entry) { return sum + entry.blob.size; }, 0);
+    meta.textContent = C.formatBytes(total) + (entries.length > 1 ? ' total' : '');
+    var actions = document.createElement('div');
+    actions.className = 'result-actions';
+
+    if (entries.length === 1) {
+      var save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'btn btn-primary';
+      save.textContent = 'download';
+      save.addEventListener('click', function () {
+        download(entries[0].blob, entries[0].fileName);
+      });
+      actions.appendChild(save);
+    } else {
+      var zip = document.createElement('button');
+      zip.type = 'button';
+      zip.className = 'btn btn-primary';
+      zip.textContent = 'download zip (' + entries.length + ')';
+      zip.addEventListener('click', async function () {
+        zip.disabled = true;
+        var original = zip.textContent;
+        try {
+          var blob = await zipEntries(entries, function (percent) {
+            zip.textContent = 'zip ' + Math.round(percent) + '%';
+          });
+          download(blob, 'optipress-' + Date.now() + '.zip');
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          zip.disabled = false;
+          zip.textContent = original;
+        }
+      });
+      actions.appendChild(zip);
+    }
+
+    box.appendChild(name);
+    box.appendChild(meta);
+    box.appendChild(actions);
+
+    if (entries.length > 1) {
+      var list = document.createElement('ul');
+      list.className = 'result-list';
+      entries.forEach(function (entry) {
+        var li = document.createElement('li');
+        var n = document.createElement('span');
+        n.textContent = entry.fileName;
+        var s = document.createElement('span');
+        s.textContent = C.formatBytes(entry.blob.size);
+        li.appendChild(n);
+        li.appendChild(s);
+        list.appendChild(li);
+      });
+      box.appendChild(list);
+    }
+    zone.appendChild(box);
+  }
+
+  function pageHint(root, id, text, warn) {
+    var el = root.querySelector('#' + id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'hint' + (warn ? ' is-error' : '');
+  }
+
+  function pagesField(id, label, value, placeholder) {
+    return (
+      '<div class="field"><label class="field-label" for="' + id + '">' + label + '</label>' +
+        '<input class="input pages-input" id="' + id + '" value="' + value + '" placeholder="' + (placeholder || '1-3, 5') + '" spellcheck="false">' +
+        '<p class="hint" id="' + id + 'Hint">Add a PDF first.</p>' +
+      '</div>'
+    );
+  }
+
+  // merge
+
+  function renderMerge(tool) {
+    pdfLayout(tool, {
+      multiple: true,
+      title: 'Select PDFs',
+      sub: 'or drop them here — order is top to bottom',
+      action: 'merge pdfs',
+      side: '<h2 class="panel-title">merge</h2><p class="hint">Combine PDFs into one file. Use ↑ and ↓ on each row to set the order.</p>'
+    });
+    mountPdfTool(tool, {
+      accept: 'pdf',
+      multiple: true,
+      action: 'merge pdfs',
+      resultLabel: 'pdf',
+      canRun: function (ctx) { return ctx.files.items.length >= 2 && ctx.files.items.every(function (i) { return !i.error; }); },
+      validate: function (ctx) {
+        if (ctx.files.items.length < 2) return 'Add at least two PDFs.';
+        if (ctx.files.items.some(function (i) { return i.error; })) return 'Remove the unreadable PDFs first.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var result = await P.merge(ctx.files.items.map(function (item) { return item.file; }), progress);
+        return [result];
       }
     });
   }
 
-  function updateProtocolHint() {
-    if (typeof location === 'undefined') return;
-    if (location.protocol === 'file:' && els.protocolHint) {
-      els.protocolHint.hidden = false;
+  // split
+
+  function renderSplit(tool) {
+    pdfLayout(tool, {
+      action: 'split pdf',
+      side:
+        '<h2 class="panel-title">split</h2>' +
+        '<div class="field"><span class="field-label">mode</span>' +
+          '<div class="seg" id="splitMode"><button type="button" data-mode="every">every N pages</button><button type="button" data-mode="ranges">custom ranges</button></div>' +
+        '</div>' +
+        '<div class="field" id="splitEveryField"><label class="field-label" for="splitEvery">pages per file</label>' +
+          '<input class="input" type="number" id="splitEvery" min="1" max="500" value="10">' +
+        '</div>' +
+        '<div class="field" id="splitRangesField">' +
+          '<label class="field-label" for="splitRanges">ranges</label>' +
+          '<input class="input pages-input" id="splitRanges" placeholder="1-3; 4-10; 11-" spellcheck="false">' +
+          '<p class="hint">Separate parts with <code>;</code>. A trailing dash means “to the end”.</p>' +
+        '</div>' +
+        '<p class="hint" id="splitHint">Add a PDF first.</p>'
+    });
+    var ctxRef = null;
+    function sync() {
+      var mode = main.querySelector('#splitMode .is-active');
+      var every = mode && mode.dataset.mode === 'every';
+      main.querySelector('#splitEveryField').hidden = !!every ? false : true;
+      main.querySelector('#splitRangesField').hidden = every ? true : false;
+      if (!ctxRef) return;
+      var pages = ctxRef.pages();
+      var hint = main.querySelector('#splitHint');
+      if (!pages) {
+        hint.textContent = 'Add a PDF first.';
+        return;
+      }
+      if (every) {
+        var n = Math.max(1, Number(main.querySelector('#splitEvery').value) || 1);
+        hint.textContent = 'Will produce ' + Math.ceil(pages / n) + ' PDFs from ' + pages + ' pages.';
+      } else {
+        var parsed = C.parseSplitSpec(main.querySelector('#splitRanges').value, pages, 'ranges');
+        hint.textContent = parsed.errors.length ? parsed.errors[0] : 'Will produce ' + parsed.parts.length + ' PDF' + (parsed.parts.length === 1 ? '' : 's') + '.';
+        hint.className = 'hint' + (parsed.errors.length ? ' is-error' : '');
+      }
     }
+    mountPdfTool(tool, {
+      action: 'split pdf',
+      resultLabel: 'pdf parts',
+      mount: function (ctx) {
+        ctxRef = ctx;
+        var modeWrap = main.querySelector('#splitMode');
+        modeWrap.addEventListener('click', function (event) {
+          var button = event.target.closest('[data-mode]');
+          if (!button) return;
+          modeWrap.querySelectorAll('button').forEach(function (b) {
+            var active = b === button;
+            b.classList.toggle('is-active', active);
+            b.setAttribute('aria-pressed', String(active));
+          });
+          sync();
+        });
+        main.querySelector('#splitEvery').addEventListener('input', sync);
+        main.querySelector('#splitRanges').addEventListener('input', sync);
+        modeWrap.querySelector('[data-mode="every"]').classList.add('is-active');
+        modeWrap.querySelector('[data-mode="every"]').setAttribute('aria-pressed', 'true');
+        modeWrap.querySelector('[data-mode="ranges"]').setAttribute('aria-pressed', 'false');
+        ctx.files.onChange = function () {
+          ctx.render();
+          var pages = ctx.pages();
+          if (pages && !main.querySelector('#splitRanges').value) {
+            var half = Math.ceil(pages / 2);
+            main.querySelector('#splitRanges').value = pages > 1 ? '1-' + half + '; ' + (half + 1) + '-' + pages : '1';
+          }
+          sync();
+        };
+        sync();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        var pages = ctx.pages();
+        if (!pages) return 'Add a readable PDF first.';
+        var every = main.querySelector('#splitMode .is-active').dataset.mode === 'every';
+        var parsed;
+        if (every) {
+          var n = Math.max(1, Number(main.querySelector('#splitEvery').value) || 1);
+          parsed = C.parseSplitSpec('', pages, 'every', n);
+        } else {
+          parsed = C.parseSplitSpec(main.querySelector('#splitRanges').value, pages, 'ranges');
+        }
+        if (parsed.errors.length) return parsed.errors[0];
+        if (!parsed.parts.length) return 'Add at least one page range.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var pages = ctx.pages();
+        var every = main.querySelector('#splitMode .is-active').dataset.mode === 'every';
+        var parts;
+        if (every) {
+          parts = C.parseSplitSpec('', pages, 'every', Math.max(1, Number(main.querySelector('#splitEvery').value) || 1)).parts;
+        } else {
+          parts = C.parseSplitSpec(main.querySelector('#splitRanges').value, pages, 'ranges').parts;
+        }
+        return P.split(ctx.files.items[0].file, parts, progress);
+      }
+    });
+    sync();
   }
 
-  function registerServiceWorker() {
-    if (!('serviceWorker' in navigator)) return;
-    if (location.protocol === 'file:') return;
+  // extract / delete
 
+  function renderExtract(tool) {
+    pdfLayout(tool, {
+      action: 'extract pages',
+      side:
+        '<h2 class="panel-title">extract</h2>' +
+        pagesField('pages', 'pages to keep', '', '1-3, 5') +
+        '<p class="hint">A new PDF containing only the pages you list.</p>'
+    });
+    var ctxRef = null;
+    mountPdfTool(tool, {
+      action: 'extract pages',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        ctxRef = ctx;
+        var input = main.querySelector('#pages');
+        function sync() {
+          var pages = ctx.pages();
+          if (!pages) {
+            pageHint(main, 'pagesHint', 'Add a PDF first.');
+            return;
+          }
+          var parsed = C.parsePageSpec(input.value, pages);
+          if (parsed.errors.length) {
+            pageHint(main, 'pagesHint', parsed.errors[0], true);
+          } else {
+            pageHint(main, 'pagesHint', parsed.pages.length + ' of ' + pages + ' pages selected.');
+            input.value = input.value || '1-' + pages;
+          }
+        }
+        input.addEventListener('input', sync);
+        ctx.files.onChange = function () {
+          ctx.render();
+          if (ctx.pages() && !input.value) input.value = '1-' + ctx.pages();
+          sync();
+        };
+        sync();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        var pages = ctx.pages();
+        if (!pages) return 'Add a readable PDF first.';
+        var parsed = C.parsePageSpec(main.querySelector('#pages').value, pages);
+        if (parsed.errors.length) return parsed.errors[0];
+        if (!parsed.pages.length) return 'Select at least one page.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var pages = ctx.pages();
+        var parsed = C.parsePageSpec(main.querySelector('#pages').value, pages);
+        return [await P.extract(ctx.files.items[0].file, parsed.pages, progress)];
+      }
+    });
+  }
+
+  function renderDelete(tool) {
+    pdfLayout(tool, {
+      action: 'delete pages',
+      side:
+        '<h2 class="panel-title">delete</h2>' +
+        pagesField('pages', 'pages to remove', '', '1, 4-6') +
+        '<p class="hint">Everything else is kept.</p>'
+    });
+    mountPdfTool(tool, {
+      action: 'delete pages',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var input = main.querySelector('#pages');
+        function sync() {
+          var pages = ctx.pages();
+          if (!pages) {
+            pageHint(main, 'pagesHint', 'Add a PDF first.');
+            return;
+          }
+          var parsed = C.parsePageSpec(input.value, pages);
+          if (parsed.errors.length) pageHint(main, 'pagesHint', parsed.errors[0], true);
+          else pageHint(main, 'pagesHint', 'Keeps ' + (pages - parsed.pages.length) + ' of ' + pages + ' pages.');
+        }
+        input.addEventListener('input', sync);
+        ctx.files.onChange = function () {
+          ctx.render();
+          if (ctx.pages() && !input.value) input.value = '1';
+          sync();
+        };
+        sync();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        var pages = ctx.pages();
+        if (!pages) return 'Add a readable PDF first.';
+        var parsed = C.parsePageSpec(main.querySelector('#pages').value, pages);
+        if (parsed.errors.length) return parsed.errors[0];
+        if (!parsed.pages.length) return 'Select at least one page.';
+        if (parsed.pages.length === pages) return 'You cannot delete every page.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var pages = ctx.pages();
+        var parsed = C.parsePageSpec(main.querySelector('#pages').value, pages);
+        return [await P.deletePages(ctx.files.items[0].file, parsed.pages, progress)];
+      }
+    });
+  }
+
+  // reorder
+
+  function renderReorder(tool) {
+    pdfLayout(tool, {
+      action: 'reorder pages',
+      side:
+        '<h2 class="panel-title">order</h2>' +
+        pagesField('order', 'new page order', '', '3, 1, 2, 4-6') +
+        '<div class="result-actions"><button type="button" class="btn btn-small" id="reverseOrder">reverse</button><button type="button" class="btn btn-small" id="resetOrder">reset</button></div>' +
+        '<p class="hint">Every page must appear exactly once. Ranges expand in order.</p>'
+    });
+    mountPdfTool(tool, {
+      action: 'reorder pages',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var input = main.querySelector('#order');
+        function sync() {
+          var pages = ctx.pages();
+          if (!pages) {
+            pageHint(main, 'orderHint', 'Add a PDF first.');
+            return;
+          }
+          var parsed = C.parsePageSpec(input.value, pages, { ordered: true, requireAll: true });
+          if (parsed.errors.length) pageHint(main, 'orderHint', parsed.errors[0], true);
+          else pageHint(main, 'orderHint', 'Ready: ' + pages + ' pages in the listed order.');
+        }
+        input.addEventListener('input', sync);
+        main.querySelector('#reverseOrder').addEventListener('click', function () {
+          var pages = ctx.pages();
+          if (!pages) return;
+          var order = [];
+          for (var i = pages; i >= 1; i--) order.push(i);
+          input.value = order.join(', ');
+          sync();
+        });
+        main.querySelector('#resetOrder').addEventListener('click', function () {
+          var pages = ctx.pages();
+          if (!pages) return;
+          input.value = '1-' + pages;
+          sync();
+        });
+        ctx.files.onChange = function () {
+          ctx.render();
+          if (ctx.pages() && !input.value) input.value = '1-' + ctx.pages();
+          sync();
+        };
+        sync();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        var pages = ctx.pages();
+        if (!pages) return 'Add a readable PDF first.';
+        var parsed = C.parsePageSpec(main.querySelector('#order').value, pages, { ordered: true, requireAll: true });
+        if (parsed.errors.length) return parsed.errors[0];
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var pages = ctx.pages();
+        var parsed = C.parsePageSpec(main.querySelector('#order').value, pages, { ordered: true, requireAll: true });
+        return [await P.reorder(ctx.files.items[0].file, parsed.pages, progress)];
+      }
+    });
+  }
+
+  // rotate
+
+  function renderRotate(tool) {
+    pdfLayout(tool, {
+      action: 'rotate pages',
+      side:
+        '<h2 class="panel-title">rotate</h2>' +
+        '<div class="field"><span class="field-label">angle</span>' +
+          '<div class="seg" id="angleSeg"><button type="button" data-angle="90">90°</button><button type="button" data-angle="180">180°</button><button type="button" data-angle="270">270°</button></div>' +
+        '</div>' +
+        pagesField('pages', 'pages', 'all', 'all, or 1-3, 5') +
+        '<p class="hint">Leave “all” to rotate every page.</p>'
+    });
+    mountPdfTool(tool, {
+      action: 'rotate pages',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var seg = main.querySelector('#angleSeg');
+        seg.querySelector('[data-angle="90"]').classList.add('is-active');
+        seg.querySelectorAll('[data-angle]').forEach(function (button) {
+          button.setAttribute('aria-pressed', String(button.dataset.angle === '90'));
+        });
+        seg.addEventListener('click', function (event) {
+          var button = event.target.closest('[data-angle]');
+          if (!button) return;
+          seg.querySelectorAll('button').forEach(function (b) {
+            var active = b === button;
+            b.classList.toggle('is-active', active);
+            b.setAttribute('aria-pressed', String(active));
+          });
+        });
+        var input = main.querySelector('#pages');
+        function sync() {
+          var pages = ctx.pages();
+          if (!pages) {
+            pageHint(main, 'pagesHint', 'Add a PDF first.');
+            return;
+          }
+          var value = input.value.trim();
+          if (!value || value.toLowerCase() === 'all') {
+            pageHint(main, 'pagesHint', 'All ' + pages + ' pages.');
+            return;
+          }
+          var parsed = C.parsePageSpec(value, pages);
+          if (parsed.errors.length) pageHint(main, 'pagesHint', parsed.errors[0], true);
+          else pageHint(main, 'pagesHint', parsed.pages.length + ' of ' + pages + ' pages.');
+        }
+        input.addEventListener('input', sync);
+        ctx.files.onChange = function () { ctx.render(); sync(); };
+        sync();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        var pages = ctx.pages();
+        if (!pages) return 'Add a readable PDF first.';
+        var value = main.querySelector('#pages').value.trim();
+        if (!value || value.toLowerCase() === 'all') return true;
+        var parsed = C.parsePageSpec(value, pages);
+        if (parsed.errors.length) return parsed.errors[0];
+        if (!parsed.pages.length) return 'Select at least one page.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var pages = ctx.pages();
+        var value = main.querySelector('#pages').value.trim();
+        var selected = !value || value.toLowerCase() === 'all' ? [] : C.parsePageSpec(value, pages).pages;
+        var angle = Number(main.querySelector('#angleSeg .is-active').dataset.angle);
+        return [await P.rotate(ctx.files.items[0].file, selected, angle, progress)];
+      }
+    });
+  }
+
+  // images to pdf
+
+  function renderImagesToPdf(tool) {
+    pdfLayout(tool, {
+      accept: 'images',
+      multiple: true,
+      title: 'Select images',
+      sub: 'or drop them here — order is top to bottom',
+      action: 'make pdf',
+      side:
+        '<h2 class="panel-title">page setup</h2>' +
+        '<div class="field"><label class="field-label" for="pageSize">page size</label>' +
+          '<select class="select" id="pageSize"><option value="a4">A4</option><option value="letter">US Letter</option><option value="auto">fit the image</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="orientation">orientation</label>' +
+          '<select class="select" id="orientation"><option value="auto">auto</option><option value="portrait">portrait</option><option value="landscape">landscape</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="margin">margin</label>' +
+          '<select class="select" id="margin"><option value="0">none</option><option value="24">small — 8 mm</option><option value="48">medium — 17 mm</option><option value="72">large — 25 mm</option></select>' +
+        '</div>'
+    });
+    mountPdfTool(tool, {
+      accept: 'images',
+      multiple: true,
+      action: 'make pdf',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var pageSize = main.querySelector('#pageSize');
+        var orientation = main.querySelector('#orientation');
+        var margin = main.querySelector('#margin');
+        pageSize.value = app.settings.pageSize;
+        orientation.value = app.settings.orientation;
+        margin.value = String(app.settings.margin);
+        pageSize.addEventListener('change', function () { updateSettings({ pageSize: pageSize.value }); });
+        orientation.addEventListener('change', function () { updateSettings({ orientation: orientation.value }); });
+        margin.addEventListener('change', function () { updateSettings({ margin: Number(margin.value) }); });
+      },
+      canRun: function (ctx) { return ctx.files.items.length >= 1; },
+      run: async function (ctx, progress) {
+        var result = await P.imagesToPdf(ctx.files.items.map(function (item) { return item.prepared || item.file; }), {
+          pageSize: main.querySelector('#pageSize').value,
+          orientation: main.querySelector('#orientation').value,
+          margin: Number(main.querySelector('#margin').value)
+        }, progress);
+        return [result];
+      }
+    });
+  }
+
+  // pdf to images
+
+  function renderPdfToImages(tool) {
+    pdfLayout(tool, {
+      action: 'render pages',
+      side:
+        '<h2 class="panel-title">page images</h2>' +
+        '<div class="field"><label class="field-label" for="imageDpi">resolution</label>' +
+          '<select class="select" id="imageDpi"><option value="72">72 dpi — preview</option><option value="150">150 dpi — screen</option><option value="200">200 dpi — detail</option><option value="300">300 dpi — print</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="imageFormat">format</label>' +
+          '<select class="select" id="imageFormat"><option value="image/jpeg">jpeg — smaller</option><option value="image/png">png — lossless</option></select>' +
+        '</div>' +
+        qualityField('quality') +
+        '<p class="hint">Each page becomes one image. Multiple pages download as a ZIP.</p>'
+    });
+    mountPdfTool(tool, {
+      action: 'render pages',
+      resultLabel: 'images',
+      mount: function (ctx) {
+        var dpi = main.querySelector('#imageDpi');
+        var format = main.querySelector('#imageFormat');
+        dpi.value = String(app.settings.imageDpi);
+        format.value = app.settings.imageFormat;
+        dpi.addEventListener('change', function () { updateSettings({ imageDpi: Number(dpi.value) }); });
+        format.addEventListener('change', function () { updateSettings({ imageFormat: format.value }); });
+        bindQuality(
+          ctx.root,
+          'quality',
+          function () { return app.settings.quality; },
+          function (value) { updateSettings({ quality: value }); },
+          null
+        );
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
+      run: async function (ctx, progress) {
+        var entries = await P.pdfToImages(ctx.files.items[0].file, {
+          dpi: Number(main.querySelector('#imageDpi').value),
+          format: main.querySelector('#imageFormat').value,
+          quality: app.settings.quality
+        }, progress);
+        return entries;
+      }
+    });
+  }
+
+  // watermark
+
+  function renderWatermark(tool) {
+    pdfLayout(tool, {
+      action: 'add watermark',
+      side:
+        '<h2 class="panel-title">watermark</h2>' +
+        '<div class="field"><label class="field-label" for="wmText">text</label>' +
+          '<input class="input" id="wmText" maxlength="80" placeholder="DRAFT">' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="wmSize">size</label>' +
+          '<div class="input-row"><input class="input" type="number" id="wmSize" min="2" max="40" value="9"><span class="unit-btn">%</span></div>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="wmOpacity">opacity</label>' +
+          '<div class="input-row"><input class="input" type="number" id="wmOpacity" min="2" max="100" value="15"><span class="unit-btn">%</span></div>' +
+        '</div>' +
+        '<div class="field"><span class="field-label">angle</span>' +
+          '<div class="seg" id="wmAngle"><button type="button" data-angle="45">45°</button><button type="button" data-angle="0">flat</button></div>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="wmColor">colour</label>' +
+          '<input class="input" type="color" id="wmColor" value="#666666">' +
+        '</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'add watermark',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var text = main.querySelector('#wmText');
+        var size = main.querySelector('#wmSize');
+        var opacity = main.querySelector('#wmOpacity');
+        var color = main.querySelector('#wmColor');
+        var angleSeg = main.querySelector('#wmAngle');
+        text.value = app.settings.watermarkText;
+        size.value = String(app.settings.watermarkSize);
+        opacity.value = String(app.settings.watermarkOpacity);
+        color.value = app.settings.watermarkColor;
+        var angleButtons = angleSeg.querySelectorAll('[data-angle]');
+        angleButtons.forEach(function (button) {
+          var active = Number(button.dataset.angle) === app.settings.watermarkAngle;
+          button.classList.toggle('is-active', active);
+          button.setAttribute('aria-pressed', String(active));
+        });
+        angleSeg.addEventListener('click', function (event) {
+          var button = event.target.closest('[data-angle]');
+          if (!button) return;
+          angleButtons.forEach(function (b) {
+            var active = b === button;
+            b.classList.toggle('is-active', active);
+            b.setAttribute('aria-pressed', String(active));
+          });
+          updateSettings({ watermarkAngle: Number(button.dataset.angle) });
+        });
+        text.addEventListener('input', function () { updateSettings({ watermarkText: text.value }); });
+        size.addEventListener('input', function () { updateSettings({ watermarkSize: Number(size.value) }); });
+        opacity.addEventListener('input', function () { updateSettings({ watermarkOpacity: Number(opacity.value) }); });
+        color.addEventListener('input', function () { updateSettings({ watermarkColor: color.value }); });
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        if (!ctx.pages()) return 'Add a readable PDF first.';
+        if (!main.querySelector('#wmText').value.trim()) return 'Type the watermark text.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        return [await P.watermark(ctx.files.items[0].file, {
+          text: main.querySelector('#wmText').value,
+          size: Number(main.querySelector('#wmSize').value),
+          opacity: Number(main.querySelector('#wmOpacity').value),
+          angle: Number(main.querySelector('#wmAngle .is-active').dataset.angle),
+          color: main.querySelector('#wmColor').value
+        }, progress)];
+      }
+    });
+  }
+
+  // page numbers
+
+  function renderPageNumbers(tool) {
+    pdfLayout(tool, {
+      action: 'add page numbers',
+      side:
+        '<h2 class="panel-title">page numbers</h2>' +
+        '<div class="field"><label class="field-label" for="numPosition">position</label>' +
+          '<select class="select" id="numPosition"><option value="bottom-center">bottom centre</option><option value="bottom-right">bottom right</option><option value="top-center">top centre</option><option value="top-right">top right</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="numFormat">format</label>' +
+          '<select class="select" id="numFormat"><option value="Page {n} of {total}">Page {n} of {total}</option><option value="{n}">n</option><option value="{n} / {total}">n / total</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="numStart">start at</label>' +
+          '<input class="input" type="number" id="numStart" min="1" value="1">' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="numSize">size</label>' +
+          '<input class="input" type="number" id="numSize" min="6" max="36" value="10">' +
+        '</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'add page numbers',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var position = main.querySelector('#numPosition');
+        var format = main.querySelector('#numFormat');
+        var start = main.querySelector('#numStart');
+        var size = main.querySelector('#numSize');
+        position.value = app.settings.numberPosition;
+        format.value = app.settings.numberFormat;
+        start.value = String(app.settings.numberStart);
+        size.value = String(app.settings.numberSize);
+        position.addEventListener('change', function () { updateSettings({ numberPosition: position.value }); });
+        format.addEventListener('change', function () { updateSettings({ numberFormat: format.value }); });
+        start.addEventListener('input', function () { updateSettings({ numberStart: Number(start.value) }); });
+        size.addEventListener('input', function () { updateSettings({ numberSize: Number(size.value) }); });
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
+      run: async function (ctx, progress) {
+        return [await P.pageNumbers(ctx.files.items[0].file, {
+          position: main.querySelector('#numPosition').value,
+          format: main.querySelector('#numFormat').value,
+          start: Number(main.querySelector('#numStart').value),
+          size: Number(main.querySelector('#numSize').value)
+        }, progress)];
+      }
+    });
+  }
+
+  // protect
+
+  function renderProtect(tool) {
+    pdfLayout(tool, {
+      action: 'encrypt pdf',
+      side:
+        '<h2 class="panel-title">password</h2>' +
+        '<div class="field"><label class="field-label" for="pw1">password</label>' +
+          '<input class="input" type="password" id="pw1" autocomplete="new-password" placeholder="at least 4 characters">' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="pw2">repeat</label>' +
+          '<input class="input" type="password" id="pw2" autocomplete="new-password">' +
+        '</div>' +
+        '<p class="hint">AES-256. The password is never stored; if you lose it, the PDF cannot be opened.</p>'
+    });
+    mountPdfTool(tool, {
+      action: 'encrypt pdf',
+      resultLabel: 'pdf',
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        if (!ctx.pages()) return 'Add a readable PDF first.';
+        var one = main.querySelector('#pw1').value;
+        var two = main.querySelector('#pw2').value;
+        if (one.length < 4) return 'Use at least 4 characters.';
+        if (one !== two) return 'The passwords do not match.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        return [await P.addPassword(ctx.files.items[0].file, {
+          userPassword: main.querySelector('#pw1').value,
+          ownerPassword: main.querySelector('#pw1').value
+        }, progress)];
+      }
+    });
+  }
+
+  function renderUnlock(tool) {
+    pdfLayout(tool, {
+      action: 'remove password',
+      side:
+        '<h2 class="panel-title">unlock</h2>' +
+        '<div class="field"><label class="field-label" for="pw">current password</label>' +
+          '<input class="input" type="password" id="pw" autocomplete="current-password">' +
+        '</div>' +
+        '<p class="hint">The output is saved without encryption. You need the password that opens the file.</p>'
+    });
+    mountPdfTool(tool, {
+      accept: 'pdf',
+      probeMode: 'none',
+      action: 'remove password',
+      resultLabel: 'pdf',
+      canRun: function (ctx) { return ctx.files.items.length === 1; },
+      validate: function (ctx) {
+        if (!ctx.files.items.length) return 'Add a password-protected PDF.';
+        if (!main.querySelector('#pw').value) return 'Enter the current password.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        return [await P.removePassword(ctx.files.items[0].file, main.querySelector('#pw').value, progress)];
+      }
+    });
+  }
+
+  // ocr
+
+  function renderOcr(tool) {
+    pdfLayout(tool, {
+      action: 'make searchable',
+      side:
+        '<h2 class="panel-title">ocr</h2>' +
+        '<div class="field"><label class="field-label" for="ocrDpi">scan resolution</label>' +
+          '<select class="select" id="ocrDpi"><option value="150">150 dpi — fast</option><option value="200">200 dpi — balanced</option><option value="300">300 dpi — slow</option></select>' +
+        '</div>' +
+        '<p class="hint">English text only. Adds an invisible, selectable text layer over each page.</p>' +
+        '<div class="notice">This is the one tool that needs the network: the OCR engine and its ~11 MB English model are downloaded from a CDN the first time. Your PDF still never leaves the device.</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'make searchable',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var dpi = main.querySelector('#ocrDpi');
+        dpi.value = String(app.settings.ocrDpi);
+        dpi.addEventListener('change', function () { updateSettings({ ocrDpi: Number(dpi.value) }); });
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
+      run: async function (ctx, progress) {
+        return [await P.ocr(ctx.files.items[0].file, { dpi: Number(main.querySelector('#ocrDpi').value) }, progress)];
+      }
+    });
+  }
+
+  // -------------------------------------------------------------- compare --
+
+  var compare = {
+    urls: [],
+    item: null,
+    lastFocus: null,
+    dragging: false,
+    modal: null
+  };
+
+  function bindCompare() {
+    compare.modal = document.getElementById('compareModal');
+    if (!compare.modal) return;
+    var close = document.getElementById('closeCompare');
+    var area = document.getElementById('compareArea');
+    var knob = document.getElementById('compareKnob');
+
+    close.addEventListener('click', function () { closeCompare(); });
+    compare.modal.addEventListener('mousedown', function (event) {
+      if (event.target === compare.modal) closeCompare();
+    });
+    compare.modal.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeCompare();
+        return;
+      }
+      if (event.key === 'Tab') {
+        var focusable = compare.modal.querySelectorAll('button, [tabindex]:not([tabindex="-1"])');
+        if (!focusable.length) return;
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    });
+
+    function setFromEvent(event) {
+      var rect = area.getBoundingClientRect();
+      setPosition(((event.clientX - rect.left) / rect.width) * 100);
+    }
+    area.addEventListener('pointerdown', function (event) {
+      compare.dragging = true;
+      area.setPointerCapture(event.pointerId);
+      setFromEvent(event);
+    });
+    area.addEventListener('pointermove', function (event) {
+      if (compare.dragging) setFromEvent(event);
+    });
+    area.addEventListener('pointerup', function () { compare.dragging = false; });
+    area.addEventListener('pointercancel', function () { compare.dragging = false; });
+    knob.addEventListener('keydown', function (event) {
+      var current = Number(knob.getAttribute('aria-valuenow')) || 50;
+      var next = null;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = current - (event.shiftKey ? 10 : 2);
+      else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = current + (event.shiftKey ? 10 : 2);
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = 100;
+      if (next === null) return;
+      event.preventDefault();
+      setPosition(next);
+    });
+  }
+
+  function setPosition(percent) {
+    var value = Math.max(0, Math.min(100, percent));
+    var area = document.getElementById('compareArea');
+    if (!area) return;
+    area.style.setProperty('--pos', value + '%');
+    document.getElementById('compareKnob').setAttribute('aria-valuenow', String(Math.round(value)));
+  }
+
+  function openCompare(item) {
+    if (!item.result || item.kind === 'pdf' || !compare.modal) return;
+    var before = item.prepared || item.file;
+    var beforeUrl = URL.createObjectURL(before);
+    var afterUrl = URL.createObjectURL(item.result.blob);
+    compare.urls = [beforeUrl, afterUrl];
+    document.getElementById('compareBefore').src = beforeUrl;
+    document.getElementById('compareAfter').src = afterUrl;
+    document.getElementById('compareFile').textContent = item.name;
+    var beforeDims = item.meta && item.meta.width ? item.meta.width + '×' + item.meta.height : '—';
+    var afterDims = item.result.width ? item.result.width + '×' + item.result.height : '—';
+    document.getElementById('compareBeforeMeta').textContent = C.formatBytes(item.size) + ' · ' + beforeDims;
+    document.getElementById('compareAfterMeta').textContent = C.formatBytes(item.result.blob.size) + ' · ' + afterDims;
+    var saved = C.savingsPercent(item.size, item.result.blob.size);
+    document.getElementById('compareSaved').textContent = (saved >= 0 ? '−' : '+') + Math.abs(saved) + '%';
+    setPosition(50);
+    compare.lastFocus = document.activeElement;
+    compare.modal.hidden = false;
+    document.body.style.overflow = 'hidden';
+    requestAnimationFrame(function () {
+      document.getElementById('compareKnob').focus();
+    });
+  }
+
+  function closeCompare(silent) {
+    if (!compare.modal || compare.modal.hidden) return;
+    compare.modal.hidden = true;
+    document.body.style.overflow = '';
+    compare.urls.forEach(function (url) {
+      try { URL.revokeObjectURL(url); } catch (err) { /* noop */ }
+    });
+    compare.urls = [];
+    var before = document.getElementById('compareBefore');
+    var after = document.getElementById('compareAfter');
+    if (before) before.removeAttribute('src');
+    if (after) after.removeAttribute('src');
+    if (!silent && compare.lastFocus && document.contains(compare.lastFocus)) compare.lastFocus.focus();
+    compare.lastFocus = null;
+  }
+
+  // ------------------------------------------------------------------- pwa --
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+    if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('./sw.js').then(function (registration) {
         registration.addEventListener('updatefound', function () {
@@ -1680,18 +3161,160 @@
           if (!installing) return;
           installing.addEventListener('statechange', function () {
             if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-              toast('A new build is ready.', 'info', {
-                label: 'Reload',
-                onClick: function () {
-                  window.location.reload();
-                }
+              toast('A new build is ready.', null, {
+                label: 'reload',
+                onClick: function () { location.reload(); }
               });
             }
           });
         });
-      }).catch(function () {
-        /* offline support is a bonus, not a requirement */
-      });
+      }).catch(function () { /* offline support is optional */ });
     });
+  }
+
+  // --------------------------------------------------------------- presets --
+
+  function fillPresetSelect() {
+    var select = document.getElementById('preset');
+    if (!select) return;
+    var html = '<option value="custom">custom size</option>';
+    Presets.groups().forEach(function (group) {
+      html += '<optgroup label="' + group.name + '">';
+      group.items.forEach(function (preset) {
+        html += '<option value="' + preset.id + '">' + preset.label + ' — ' + preset.detail + '</option>';
+      });
+      html += '</optgroup>';
+    });
+    select.innerHTML = html;
+    select.value = Presets.byId(app.settings.presetId) ? app.settings.presetId : 'custom';
+  }
+
+  // ----------------------------------------------------------------- tools --
+
+  var TOOLS = {
+    squeeze: {
+      group: 'images',
+      label: 'Squeeze',
+      card: 'Squeeze',
+      blurb: 'Shrink images and PDFs with measured savings, a target size, and a real quality check.',
+      view: renderSqueeze
+    },
+    crop: {
+      group: 'images',
+      label: 'Crop & size',
+      card: 'Crop & size',
+      blurb: 'Crop to passport, visa, government-form or social sizes — or type your own pixels.',
+      view: renderCrop
+    },
+    convert: {
+      group: 'images',
+      label: 'Convert',
+      card: 'Convert',
+      blurb: 'Move between WebP, JPEG, PNG, AVIF or a custom MIME type. Resize and cap the size.',
+      view: renderConvert
+    },
+    merge: {
+      group: 'pdf · organise',
+      label: 'Merge PDFs',
+      card: 'Merge PDFs',
+      blurb: 'Combine several PDFs into one, in the order you choose.',
+      view: renderMerge
+    },
+    split: {
+      group: 'pdf · organise',
+      label: 'Split PDF',
+      card: 'Split PDF',
+      blurb: 'Cut a PDF into several files by page ranges or every N pages.',
+      view: renderSplit
+    },
+    extract: {
+      group: 'pdf · organise',
+      label: 'Extract pages',
+      card: 'Extract pages',
+      blurb: 'Make a new PDF from only the pages you pick.',
+      view: renderExtract
+    },
+    delete: {
+      group: 'pdf · organise',
+      label: 'Delete pages',
+      card: 'Delete pages',
+      blurb: 'Remove pages you do not need, keeping the rest intact.',
+      view: renderDelete
+    },
+    reorder: {
+      group: 'pdf · organise',
+      label: 'Reorder pages',
+      card: 'Reorder pages',
+      blurb: 'Move pages into a new order, then save a clean copy.',
+      view: renderReorder
+    },
+    rotate: {
+      group: 'pdf · organise',
+      label: 'Rotate pages',
+      card: 'Rotate pages',
+      blurb: 'Turn some or all pages by 90°, 180° or 270°.',
+      view: renderRotate
+    },
+    'images-to-pdf': {
+      group: 'pdf · convert',
+      label: 'Images to PDF',
+      card: 'Images to PDF',
+      blurb: 'Turn JPEG, PNG, HEIC and other images into one PDF.',
+      view: renderImagesToPdf
+    },
+    'pdf-to-images': {
+      group: 'pdf · convert',
+      label: 'PDF to images',
+      card: 'PDF to images',
+      blurb: 'Save every page as a PNG or JPEG, one image per page.',
+      view: renderPdfToImages
+    },
+    ocr: {
+      group: 'pdf · convert',
+      label: 'Make searchable',
+      card: 'Make searchable',
+      blurb: 'Recognise English text in scans and add an invisible, searchable layer.',
+      view: renderOcr
+    },
+    'compress-pdf': {
+      group: 'pdf · edit',
+      label: 'Compress PDF',
+      card: 'Compress PDF',
+      blurb: 'Rebuild pages at a lower quality, or keep the text and re-save the structure.',
+      view: renderCompressPdf
+    },
+    watermark: {
+      group: 'pdf · edit',
+      label: 'Add watermark',
+      card: 'Add watermark',
+      blurb: 'Stamp text such as DRAFT across every page.',
+      view: renderWatermark
+    },
+    'page-numbers': {
+      group: 'pdf · edit',
+      label: 'Page numbers',
+      card: 'Page numbers',
+      blurb: 'Number pages at the top or bottom, starting where you like.',
+      view: renderPageNumbers
+    },
+    protect: {
+      group: 'pdf · secure',
+      label: 'Add password',
+      card: 'Add password',
+      blurb: 'Require a password to open the PDF, using AES-256 encryption.',
+      view: renderProtect
+    },
+    unlock: {
+      group: 'pdf · secure',
+      label: 'Remove password',
+      card: 'Remove password',
+      blurb: 'Remove a PDF password you know and save an unlocked copy.',
+      view: renderUnlock
+    }
+  };
+
+  function renderTool(tool) {
+    document.title = tool.label + ' — OptiPress';
+    tool.view(tool);
   }
 })();

@@ -1,14 +1,27 @@
 # OptiPress
 
-A private, on-device file squeezer for PDFs and images. Files never leave the browser tab.
+**Live:** https://optipress.harshbanker.com
 
-- **Formats** — PDF, HEIC/HEIF, PNG, JPEG, WebP, AVIF, GIF, BMP, SVG
-- **Real numbers** — the live estimate is measured by encoding a sample of your actual pixels, not a guess
-- **Target size** — binary-searches quality, then falls back to downscaling, until the file fits
-- **PDF modes** — rasterise for maximum savings, or keep text selectable
-- **Batch queue** — parallel processing, ZIP download, per-file download, retry, and quality comparison
-- **Private by architecture** — no server, no uploads, no accounts, no tracking; EXIF (including GPS) is stripped
-- **PWA** — installable and fully functional offline
+A local-first image and PDF workshop. Nothing is uploaded, nothing is tracked, and every tool runs in the browser tab.
+
+## Images
+
+- **Squeeze** — WebP/JPEG/PNG/AVIF output with a live estimate measured from real sample encodes.
+- **Crop & size** — crop-to-fill or fit-inside, with passport, visa, government-form, social and print presets. A live preview shows exactly what will be written.
+- **Exact file sizes** — request 400 KB and get 400 KB. OptiPress searches the highest quality under the cap, downsizes only when necessary, then pads with harmless metadata (JPEG comments, PNG `tEXt`, WebP `JUNK`, AVIF `free`, PDF comments) to land **byte-exact** on the limit.
+- **Custom MIME output** — type any `image/*` type the browser can encode. Unsupported types are detected and blocked before the run.
+- Transparency-aware output: WebP/PNG keep alpha; JPEG is matted white or black instead of turning black.
+
+## PDF
+
+Organise: **merge**, **split** (every N pages or custom ranges), **extract**, **delete**, **reorder**, **rotate**.
+Convert: **images → PDF**, **PDF → images** (JPEG/PNG ZIP), **make searchable** (OCR).
+Edit: **compress** (rasterise or keep text), **watermark**, **page numbers**.
+Secure: **add password** (AES-256), **remove password**.
+
+## Privacy
+
+Files are decoded, re-encoded and written in the tab. There are no uploads, accounts, analytics or tracking. The app works offline after the first load. OCR is the one exception: it downloads an English model (~11 MB) from a CDN the first time, but the PDF still never leaves the device.
 
 ## Development
 
@@ -20,11 +33,11 @@ npm run dev          # http://localhost:4173
 ## Tests
 
 ```bash
-npm test             # pure logic: resize maths, format choice, naming, budgets
-npm run test:e2e     # real Chromium: compression, target size, transparency, PDFs, ZIP, a11y
+npm test             # 30 unit tests: resize/crop maths, page ranges, padding, presets, MIME choice
+npm run test:e2e     # 26 real-browser checks across every tool, exact sizes, PDFs, OCR, axe, mobile
 ```
 
-The end-to-end suite needs a local server and Playwright's Chromium (or system Chrome):
+The E2E suite needs a local server and Playwright Chromium (or system Chrome):
 
 ```bash
 npm run dev
@@ -35,26 +48,22 @@ npm run test:e2e
 ## Build
 
 ```bash
-npm run build        # minified, hashed service worker, validated asset graph → dist/
+npm run build        # minified JS/CSS, hashed service worker, validated asset graph → dist/
 npm run preview      # serve dist/ on http://localhost:4173
 ```
 
 ## Deploy
 
-Pushing to `main` runs `.github/workflows/pages.yml`: tests, build, and deploy to GitHub Pages.
-Enable **Settings → Pages → Source: GitHub Actions** once in the repository.
+- **Vercel** — `vercel.json` builds `npm run build` and publishes `dist/`. The domain is `optipress.harshbanker.com`.
+- **GitHub Pages** — `.github/workflows/pages.yml` runs tests, builds and deploys on every push to `main`.
 
-## How it works
+## Notes & limits
 
-- Images are decoded with `createImageBitmap` (honouring EXIF orientation), rendered to a canvas at the requested size, and re-encoded. JPEG output is matted so transparency never turns black.
-- PDFs are rasterised page-by-page with PDF.js at the chosen DPI and rebuilt with pdf-lib, or re-saved with object streams to keep text selectable.
-- HEIC is decoded natively where supported, otherwise with the bundled `heic2any`.
-- If a re-encode would be larger than the original and nothing was explicitly changed, OptiPress keeps the original file.
-- Everything is static: `index.html`, `styles.css`, `core.js`, `compressor.js`, `app.js`, plus the bundled libraries in `lib/`.
+- Rasterising a PDF flattens text and links. Switch the engine to “keep text selectable” when that matters.
+- Animated GIFs become a single frame; SVG is rasterised.
+- Browsers cap canvas size; images above 40 MP are scaled to stay safe.
+- Password-protected PDFs must be unlocked before page tools can read them (the Remove password tool is there for that).
+- Passport/visa/government dimensions and caps are commonly cited values, not legal advice. Confirm with the issuing authority before uploading.
+- OCR is English-only in this build.
 
-## Honest limitations
-
-- Rasterised PDFs lose selectable text and links — switch the PDF engine to “Keep text” when that matters.
-- Animated GIFs are flattened to one frame.
-- Browsers cap canvas size; very large images are scaled down to stay within a 40 MP budget.
-- Password-protected PDFs must be unlocked first.
+Built with PDF.js, pdf-lib (AES fork), heic2any, JSZip and Tesseract.js (OCR only). Type: IBM Plex Mono and Instrument Sans. Interface language inspired by [Estudely PDF](https://pdf.esdy.cc/).

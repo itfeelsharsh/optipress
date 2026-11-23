@@ -36,11 +36,14 @@ fs.mkdirSync(dist, { recursive: true });
 for (const file of ['index.html', 'manifest.json']) {
   fs.copyFileSync(path.join(projectRoot, file), path.join(dist, file));
 }
+if (fs.existsSync(path.join(projectRoot, 'CNAME'))) {
+  fs.copyFileSync(path.join(projectRoot, 'CNAME'), path.join(dist, 'CNAME'));
+}
 for (const dir of ['assets', 'fonts', 'lib']) {
   copyDir(path.join(projectRoot, dir), path.join(dist, dir));
 }
 
-const jsFiles = ['core.js', 'compressor.js', 'app.js'];
+const jsFiles = ['core.js', 'presets.js', 'padding.js', 'compressor.js', 'pdf-tools.js', 'app.js'];
 const cssFiles = ['styles.css'];
 const hash = crypto.createHash('sha256');
 
@@ -79,6 +82,6 @@ if (missing.length) {
 
 const sizeOf = (file) => (fs.statSync(file).size / 1024).toFixed(1) + ' KB';
 console.log('Built dist/ (' + buildId + ')');
-for (const file of ['index.html', 'styles.css', 'core.js', 'compressor.js', 'app.js', 'sw.js']) {
+for (const file of ['index.html', 'styles.css', 'core.js', 'presets.js', 'padding.js', 'compressor.js', 'pdf-tools.js', 'app.js', 'sw.js']) {
   console.log('  ' + file.padEnd(15) + sizeOf(path.join(dist, file)));
 }
