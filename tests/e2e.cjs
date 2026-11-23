@@ -257,12 +257,108 @@ async function makeFixtures() {
     if (!(await page.locator('.tool-title').isVisible())) throw new Error('about missing');
   });
 
-  await check('home dropzone carries files into squeeze', async () => {
+  await check('home asks which tool to use instead of auto-squeezing', async () => {
     await fresh('#/');
     await page.setInputFiles('#home-input', [path.join(FIXTURES, 'graphic.png')]);
+    await page.waitForSelector('#toolPicker[open]');
+    if (await page.locator('[data-tool="compress-pdf"]').count()) throw new Error('PDF tools shown for an image');
+    if (!(await page.locator('[data-tool="crop"]').count())) throw new Error('crop missing for an image');
+    await audit('picker', '#toolPicker');
+    await page.locator('[data-tool="squeeze"]').click();
     await page.waitForFunction(() => location.hash === '#/squeeze');
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(1300);
     if ((await page.locator('.file-row').count()) !== 1) throw new Error('file was not carried over');
+  });
+
+  await check('home picker filters PDF tools for PDFs', async () => {
+    await fresh('#/');
+    await page.setInputFiles('#home-input', [path.join(FIXTURES, 'report.pdf')]);
+    await page.waitForSelector('#toolPicker[open]');
+    if (await page.locator('[data-tool="crop"]').count()) throw new Error('image tool shown for a PDF');
+    if (!(await page.locator('[data-tool="compress-pdf"]').count())) throw new Error('compress missing');
+    if (!(await page.locator('[data-tool="split"]').count())) throw new Error('split missing');
+    await page.locator('[data-tool="compress-pdf"]').click();
+    await page.waitForFunction(() => location.hash === '#/compress-pdf');
+    await page.waitForTimeout(1300);
+    if ((await page.locator('.file-row').count()) !== 1) throw new Error('PDF not carried over');
+  });
+
+  await check('home picker handles a mixed selection with Squeeze only', async () => {
+    await fresh('#/');
+    await page.setInputFiles('#home-input', [path.join(FIXTURES, 'graphic.png'), path.join(FIXTURES, 'report.pdf')]);
+    await page.waitForSelector('#toolPicker[open]');
+    const tools = await page.locator('.picker-item').count();
+    if (tools !== 1) throw new Error('expected one compatible tool, got ' + tools);
+    if (!(await page.locator('[data-tool="squeeze"]').count())) throw new Error('squeeze missing');
+    if (await page.locator('#pickerNote').isHidden()) throw new Error('mixed note missing');
+    await page.locator('[data-tool="squeeze"]').click();
+    await page.waitForFunction(() => location.hash === '#/squeeze');
+    await page.waitForTimeout(1500);
+    if ((await page.locator('.file-row').count()) !== 2) throw new Error('mixed files not carried');
+  });
+
+  await check('leaving a tool with files asks before discarding', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.click('a.nav-link[href="#/"]');
+    await page.waitForSelector('#leaveDialog[open]');
+    const hashWhileAsking = await page.evaluate(() => location.hash);
+    if (hashWhileAsking !== '#/crop') throw new Error('URL changed before confirming: ' + hashWhileAsking);
+    await audit('leave dialog', '#leaveDialog');
+    await page.click('#stayBtn');
+    await page.waitForFunction(() => !document.querySelector('#leaveDialog').open);
+    if ((await page.evaluate(() => location.hash)) !== '#/crop') throw new Error('stay did not restore');
+    if ((await page.locator('.file-row').count()) !== 1) throw new Error('files were lost on stay');
+    await page.click('a.nav-link[href="#/"]');
+    await page.waitForSelector('#leaveDialog[open]');
+    await page.click('#leaveBtn');
+    await page.waitForFunction(() => location.hash === '#/' || location.hash === '');
+    await page.waitForTimeout(400);
+    if (!(await page.locator('.hero-title').isVisible())) throw new Error('did not navigate home');
+  });
+
+  await check('dragging onto home opens the picker and hides the overlay', async () => {
+    await fresh('#/');
+    const dataTransfer = await page.evaluateHandle(async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 24;
+      canvas.height = 24;
+      canvas.getContext('2d').fillRect(0, 0, 24, 24);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([blob], 'home-drop.png', { type: 'image/png' }));
+      return transfer;
+    });
+    await page.dispatchEvent('body', 'dragenter', { dataTransfer });
+    if (await page.locator('#dropOverlay').isHidden()) throw new Error('overlay never appeared');
+    await page.dispatchEvent('body', 'drop', { dataTransfer });
+    await page.waitForSelector('#toolPicker[open]');
+    if (await page.locator('#dropOverlay').isVisible()) throw new Error('overlay stayed after drop');
+    if (!(await page.locator('[data-tool="crop"]').count())) throw new Error('picker did not receive the dropped image');
+    await page.click('#pickerCancel');
+  });
+
+  await check('dragging and dropping hides the overlay and adds files', async () => {
+    await fresh('#/squeeze');
+    const dataTransfer = await page.evaluateHandle(async () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 24;
+      canvas.height = 24;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#e4551f';
+      ctx.fillRect(0, 0, 24, 24);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const file = new File([blob], 'dropped.png', { type: 'image/png' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      return dt;
+    });
+    await page.dispatchEvent('body', 'dragenter', { dataTransfer });
+    if (await page.locator('#dropOverlay').isHidden()) throw new Error('overlay never appeared');
+    await page.dispatchEvent('body', 'drop', { dataTransfer });
+    await page.waitForTimeout(1200);
+    if (await page.locator('#dropOverlay').isVisible()) throw new Error('overlay stayed after drop');
+    if ((await page.locator('.file-row').count()) < 1) throw new Error('dropped file not added');
   });
 
   // ------------------------------------------------------------------ crop --
@@ -393,6 +489,13 @@ async function makeFixtures() {
     await upload([path.join(FIXTURES, 'report.pdf')]);
     if (!(await page.locator('#imagePanel').isHidden())) throw new Error('image panel visible');
     if (!(await page.locator('#pdfPanel').isVisible())) throw new Error('pdf panel hidden');
+  });
+
+  await check('image-only squeeze hides PDF controls', async () => {
+    await fresh('#/squeeze');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    if (!(await page.locator('#pdfPanel').isHidden())) throw new Error('pdf panel visible');
+    if (!(await page.locator('#imagePanel').isVisible())) throw new Error('image panel hidden');
   });
 
   // ------------------------------------------------------------------- pdf --

@@ -15,6 +15,11 @@
   var toasts = document.getElementById('toasts');
   var live = document.getElementById('liveStatus');
   var dropOverlay = document.getElementById('dropOverlay');
+  var pickerDialog = document.getElementById('toolPicker');
+  var pickerList = document.getElementById('pickerList');
+  var pickerNote = document.getElementById('pickerNote');
+  var pickerFilesEl = document.getElementById('pickerFiles');
+  var leaveDialog = document.getElementById('leaveDialog');
 
   var STORAGE = { settings: 'optipress:settings:v3', theme: 'optipress:theme:v2' };
   var LIMITS = { files: 80, bytes: 200 * 1024 * 1024 };
@@ -59,7 +64,12 @@
     dropHandler: null,
     busy: false,
     installPrompt: null,
-    estimateCache: new Map()
+    estimateCache: new Map(),
+    currentFiles: null,
+    allowLeave: false,
+    lastHash: '#/',
+    pickerFiles: [],
+    leaveTarget: null
   };
 
   var cleanups = [];
@@ -78,10 +88,17 @@
     applyTheme();
     bindChrome();
     bindCompare();
+    bindDialogs();
     bindGlobalDrop();
     bindPaste();
     registerServiceWorker();
-    window.addEventListener('hashchange', route);
+    app.lastHash = location.hash || '#/';
+    window.addEventListener('hashchange', handleHashChange);
+    window.addEventListener('beforeunload', function (event) {
+      if (!hasUnsavedChanges()) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
     document.addEventListener('keydown', function (event) {
       if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return;
       var button = document.getElementById('runBtn');
@@ -111,6 +128,7 @@
     });
     cleanups = [];
     app.dropHandler = null;
+    app.currentFiles = null;
     app.estimateCache.clear();
     closeCompare(true);
   }
@@ -682,19 +700,18 @@
           accept: 'all',
           multiple: true,
           title: 'Select files',
-          sub: 'or drop them here — images, HEIC and PDFs'
+          sub: 'or drop them here — images, HEIC and PDFs',
+          note: 'You choose the tool next. Nothing is uploaded.'
         }) +
         '<p class="section-label">or open a tool</p>' +
         toolGroupsHtml() +
       '</section>';
 
     bindUploader('home', function (files) {
-      app.pendingFiles = files;
-      location.hash = '#/squeeze';
+      openToolPicker(files);
     });
     app.dropHandler = function (files) {
-      app.pendingFiles = files;
-      location.hash = '#/squeeze';
+      openToolPicker(files);
     };
   }
 
@@ -746,6 +763,7 @@
             '</div>' +
             '<div class="panel"><h2 class="panel-title">credits</h2>' +
               '<p class="hint">Built with PDF.js, pdf-lib, heic2any, JSZip and Tesseract.js (OCR only). Interface language inspired by <a href="https://pdf.esdy.cc/" rel="noreferrer noopener">Estudely PDF</a>. Type: IBM Plex Mono and Instrument Sans.</p>' +
+              '<p class="hint mt-8">Made by <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">Harsh Banker</a> · <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">harshbanker.com</a>.</p>' +
             '</div>' +
           '</div>' +
           '<aside class="col-side">' +
@@ -755,6 +773,169 @@
           '</aside>' +
         '</div>' +
       '</section>';
+  }
+
+  // ----------------------------------------------------------- tool picker --
+
+  function bindDialogs() {
+    if (pickerDialog) {
+      document.getElementById('pickerClose').addEventListener('click', function () {
+        pickerDialog.close();
+      });
+      document.getElementById('pickerCancel').addEventListener('click', function () {
+        pickerDialog.close();
+      });
+      pickerDialog.addEventListener('click', function (event) {
+        if (event.target === pickerDialog) pickerDialog.close();
+      });
+      pickerDialog.addEventListener('close', function () {
+        app.pickerFiles = [];
+      });
+      pickerList.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-tool]');
+        if (!button) return;
+        var tool = button.dataset.tool;
+        var files = app.pickerFiles.slice();
+        app.pendingFiles = files;
+        pickerDialog.close();
+        location.hash = '#/' + tool;
+      });
+    }
+
+    if (leaveDialog) {
+      document.getElementById('stayBtn').addEventListener('click', function () {
+        leaveDialog.close();
+        app.leaveTarget = null;
+      });
+      document.getElementById('leaveBtn').addEventListener('click', function () {
+        var target = app.leaveTarget;
+        app.leaveTarget = null;
+        leaveDialog.close();
+        if (!target) return;
+        app.allowLeave = true;
+        app.lastHash = target;
+        location.hash = target;
+      });
+      leaveDialog.addEventListener('click', function (event) {
+        if (event.target === leaveDialog) leaveDialog.close();
+      });
+    }
+  }
+
+  function openToolPicker(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    var supported = files.filter(function (file) { return C.isSupported(file); });
+    if (!supported.length) {
+      toast('Nothing in this selection can be processed.', 'error');
+      return;
+    }
+    if (supported.length !== files.length) {
+      toast((files.length - supported.length) + ' unsupported file(s) ignored.', 'error');
+    }
+
+    // Merge with a picker that is already open (drop again).
+    var existing = app.pickerFiles.slice();
+    supported.forEach(function (file) {
+      var duplicate = existing.some(function (entry) {
+        return entry.name === file.name && entry.size === file.size && entry.lastModified === file.lastModified;
+      });
+      if (!duplicate) existing.push(file);
+    });
+    app.pickerFiles = existing;
+
+    var images = existing.filter(function (file) { return C.kindOf(file) !== 'pdf'; });
+    var pdfs = existing.filter(function (file) { return C.kindOf(file) === 'pdf'; });
+    var ids = [];
+    var note = '';
+
+    if (images.length && !pdfs.length) {
+      ids = ['squeeze', 'crop', 'convert', 'images-to-pdf'];
+    } else if (pdfs.length && !images.length) {
+      if (pdfs.length === 1) {
+        ids = ['compress-pdf', 'split', 'extract', 'delete', 'reorder', 'rotate', 'pdf-to-images', 'watermark', 'page-numbers', 'protect', 'unlock', 'ocr'];
+      } else {
+        ids = ['merge', 'compress-pdf'];
+        note = 'Page tools work on one PDF at a time. Add a single PDF for split, extract, rotate and the rest.';
+      }
+    } else {
+      ids = ['squeeze'];
+      note = 'Mixed selection: Squeeze handles both. For crop, convert and PDF page tools, add only one kind of file.';
+    }
+
+    pickerFilesEl.textContent = [
+      images.length ? images.length + (images.length === 1 ? ' image' : ' images') : '',
+      pdfs.length ? pdfs.length + (pdfs.length === 1 ? ' PDF' : ' PDFs') : '',
+      C.formatBytes(existing.reduce(function (sum, file) { return sum + file.size; }, 0))
+    ].filter(Boolean).join(' · ');
+
+    pickerList.textContent = '';
+    ids.forEach(function (id) {
+      var tool = TOOLS[id];
+      if (!tool) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'picker-item';
+      button.dataset.tool = id;
+      var name = document.createElement('span');
+      name.className = 'picker-name';
+      name.textContent = tool.card;
+      var desc = document.createElement('span');
+      desc.className = 'picker-desc';
+      desc.textContent = tool.blurb;
+      button.appendChild(name);
+      button.appendChild(desc);
+      pickerList.appendChild(button);
+    });
+
+    pickerNote.hidden = !note;
+    pickerNote.textContent = note;
+
+    if (!pickerDialog.open) {
+      pickerDialog.showModal();
+      var first = pickerList.querySelector('.picker-item');
+      if (first) first.focus();
+    }
+  }
+
+  function hasUnsavedChanges() {
+    return !!(app.currentFiles && app.currentFiles.items.length);
+  }
+
+  function showLeaveDialog(target) {
+    if (!leaveDialog || !hasUnsavedChanges()) return;
+    var count = app.currentFiles.items.length;
+    var label = document.title.split(' — ')[0] || 'this tool';
+    document.getElementById('leaveText').textContent =
+      'You have ' + count + ' file' + (count === 1 ? '' : 's') + ' in ' + label +
+      '. Leaving discards them and any results. Download anything you need first.';
+    app.leaveTarget = target;
+    leaveDialog.showModal();
+    document.getElementById('stayBtn').focus();
+  }
+
+  function handleHashChange() {
+    var next = location.hash || '#/';
+    if (app.allowLeave) {
+      app.allowLeave = false;
+      app.lastHash = next;
+      route();
+      return;
+    }
+    if (next === app.lastHash) return;
+    if (app.busy) {
+      history.replaceState(null, '', app.lastHash);
+      toast('Wait for the current run to finish before leaving.', 'error');
+      return;
+    }
+    if (hasUnsavedChanges()) {
+      var target = next;
+      history.replaceState(null, '', app.lastHash);
+      showLeaveDialog(target);
+      return;
+    }
+    app.lastHash = next;
+    route();
   }
 
   // ------------------------------------------------------------- utilities --
@@ -774,6 +955,7 @@
         '<span class="legend">· ' + (opts.compact ? 'add files' : 'files') + ' ·</span>' +
         '<span class="dz-title">' + (opts.title || 'Select files') + '</span>' +
         '<span class="dz-sub">' + (opts.sub || 'or drop them here') + '</span>' +
+        (opts.note ? '<span class="dz-note">' + opts.note + '</span>' : '') +
       '</button>'
     );
   }
@@ -796,12 +978,7 @@
     zone.addEventListener('dragleave', function () {
       zone.classList.remove('is-dragover');
     });
-    zone.addEventListener('drop', function (event) {
-      event.preventDefault();
-      event.stopPropagation();
-      zone.classList.remove('is-dragover');
-      if (event.dataTransfer && event.dataTransfer.files.length) onFiles(Array.prototype.slice.call(event.dataTransfer.files));
-    });
+
   }
 
   function bindGlobalDrop() {
@@ -809,6 +986,13 @@
     function hasFiles(event) {
       var types = event.dataTransfer && event.dataTransfer.types;
       return types && Array.prototype.indexOf.call(types, 'Files') !== -1;
+    }
+    function hide() {
+      depth = 0;
+      if (dropOverlay) dropOverlay.hidden = true;
+      document.querySelectorAll('.dropzone.is-dragover').forEach(function (zone) {
+        zone.classList.remove('is-dragover');
+      });
     }
     window.addEventListener('dragenter', function (event) {
       if (!hasFiles(event) || !app.dropHandler) return;
@@ -822,22 +1006,24 @@
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
     });
     window.addEventListener('dragleave', function (event) {
+      if (!event.relatedTarget) {
+        hide();
+        return;
+      }
       if (!hasFiles(event)) return;
       depth = Math.max(0, depth - 1);
-      if (!depth && dropOverlay) dropOverlay.hidden = true;
+      if (!depth) hide();
     });
+    // Capture phase: the overlay must disappear even if a child stops propagation.
     window.addEventListener('drop', function (event) {
+      hide();
       if (!app.dropHandler) return;
       if (!(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length)) return;
       event.preventDefault();
-      depth = 0;
-      if (dropOverlay) dropOverlay.hidden = true;
       app.dropHandler(Array.prototype.slice.call(event.dataTransfer.files));
-    });
-    window.addEventListener('dragend', function () {
-      depth = 0;
-      if (dropOverlay) dropOverlay.hidden = true;
-    });
+    }, true);
+    window.addEventListener('dragend', hide);
+    window.addEventListener('blur', hide);
   }
 
   function bindPaste() {
@@ -1516,6 +1702,7 @@
               '</select>' +
             '</div>' +
           '</div>' +
+          '<p class="hint" id="mixNote" hidden>Image settings apply to images; PDF settings apply to PDFs.</p>' +
           '<div class="summary" id="summary"></div>' +
           '<div class="run-bar">' +
             '<button type="button" class="btn btn-primary btn-wide" id="runBtn" disabled>squeeze</button>' +
@@ -1685,6 +1872,7 @@
 
   function mountImageTool(config) {
     var files = config.files;
+    app.currentFiles = files;
     var list = main.querySelector('#fileList');
     var summary = main.querySelector('#summary');
     var runBtn = main.querySelector('#runBtn');
@@ -1741,8 +1929,10 @@
       var hasImage = files.items.some(function (item) { return item.kind !== 'pdf'; });
       var pdfPanel = main.querySelector('#pdfPanel');
       var imagePanel = main.querySelector('#imagePanel');
+      var mixNote = main.querySelector('#mixNote');
       if (pdfPanel) pdfPanel.hidden = !hasPdf;
       if (imagePanel) imagePanel.hidden = files.items.length > 0 && !hasImage;
+      if (mixNote) mixNote.hidden = !(hasPdf && hasImage);
     }
 
     async function runItems(specific) {
@@ -2113,6 +2303,7 @@
     onCleanup(function () {
       estimator.destroy();
       files.cleanup();
+      if (app.currentFiles === files) app.currentFiles = null;
     });
   }
 
@@ -2153,6 +2344,7 @@
       max: config.max || 40,
       onChange: null
     });
+    app.currentFiles = files;
     var list = main.querySelector('#fileList');
     var resultZone = main.querySelector('#resultZone');
     var runBtn = main.querySelector('#runBtn');
@@ -2257,6 +2449,7 @@
     ctx.render();
     onCleanup(function () {
       files.cleanup();
+      if (app.currentFiles === files) app.currentFiles = null;
     });
     return ctx;
   }

@@ -63,6 +63,8 @@
       <span aria-hidden="true">·</span>
       <a href="#/about">about &amp; privacy</a>
       <span aria-hidden="true">·</span>
+      <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">made by Harsh Banker</a>
+      <span aria-hidden="true">·</span>
       <span>v2.1</span>
     </p>
   </footer>
@@ -96,6 +98,32 @@
   <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
     <p>drop files to add them</p>
   </div>
+
+  <dialog class="dialog picker" id="toolPicker" aria-labelledby="pickerTitle">
+    <div class="dialog-head">
+      <div>
+        <h2 class="dialog-title" id="pickerTitle">what do you want to do?</h2>
+        <p class="dialog-sub" id="pickerFiles"></p>
+      </div>
+      <button type="button" class="x-btn" id="pickerClose" aria-label="Close tool chooser">&times;</button>
+    </div>
+    <div class="picker-list" id="pickerList"></div>
+    <p class="hint picker-note" id="pickerNote" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-quiet" id="pickerCancel">cancel</button>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="leaveDialog" aria-labelledby="leaveTitle">
+    <div class="dialog-head">
+      <h2 class="dialog-title" id="leaveTitle">leave this tool?</h2>
+    </div>
+    <p class="dialog-body" id="leaveText"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-primary" id="stayBtn">stay</button>
+      <button type="button" class="btn btn-danger" id="leaveBtn">leave &amp; discard</button>
+    </div>
+  </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
   <p class="sr-only" id="liveStatus" role="status" aria-live="polite"></p>
