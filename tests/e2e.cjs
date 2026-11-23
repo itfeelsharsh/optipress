@@ -81,7 +81,7 @@ async function downloadResult() {
     page.waitForEvent('download', { timeout: 120000 }),
     page.locator('#resultZone .result .btn-primary').click()
   ]);
-  const target = path.join(FIXTURES, 'out-' + Date.now() + '-' + download.suggestedFilename());
+  const target = path.join(FIXTURES, download.suggestedFilename());
   await download.saveAs(target);
   return target;
 }

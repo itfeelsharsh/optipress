@@ -1990,7 +1990,7 @@
             renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
             updateSummary(summary, files, estimates, measuring);
           }
-        });
+        }, targets, config.outputSuffix);
 
         var done = files.items.filter(function (item) { return item.status === 'done'; });
         var failed = files.items.filter(function (item) { return item.status === 'error'; });
