@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * End-to-end checks for every OptiPress tool.
+ * End-to-end checks for every Opti tool.
  *
  *   npm run dev
  *   npm run test:e2e
@@ -17,8 +17,8 @@ const { execFileSync } = require('node:child_process');
 const { chromium } = require('playwright');
 
 const BASE = process.env.OPTI_BASE || 'http://localhost:4173/';
-const FIXTURES = '/tmp/optipress-e2e';
-const SHOTS = '/tmp/optipress-shots';
+const FIXTURES = '/tmp/opti-e2e';
+const SHOTS = '/tmp/opti-shots';
 const AXE = require.resolve('axe-core/axe.min.js');
 
 let browser;
@@ -168,7 +168,7 @@ async function makeFixtures() {
     }
     ctx.fillStyle = 'rgba(255,255,255,0.92)';
     ctx.font = '600 96px Georgia';
-    ctx.fillText('OptiPress fixture', 160, 260);
+    ctx.fillText('Opti fixture', 160, 260);
     return canvas.toDataURL('image/jpeg', 0.94);
   });
   fs.writeFileSync(path.join(FIXTURES, 'photo.jpg'), Buffer.from(photo.split(',')[1], 'base64'));
@@ -212,7 +212,7 @@ async function makeFixtures() {
         .map(
           (_, i) =>
             '<section style="page-break-after:always;padding:40px;font:18px Georgia">' +
-            '<h1 style="font:600 42px Georgia">OptiPress PDF ' + (i + 1) + '</h1>' +
+            '<h1 style="font:600 42px Georgia">Opti PDF ' + (i + 1) + '</h1>' +
             '<img src="' + photo + '" style="width:100%;max-height:600px;object-fit:cover"/>' +
             '<p>' + 'Selectable text '.repeat(36) + '</p>' +
             '</section>'
@@ -239,7 +239,15 @@ async function makeFixtures() {
     await fresh('#/');
     const cards = await page.locator('.tool-card').count();
     if (cards !== 17) throw new Error('tool cards: ' + cards);
-    if (!(await page.locator('.hero-title').innerText()).includes('your files')) throw new Error('hero missing');
+    const title = await page.title();
+    if (!title.startsWith('Opti')) throw new Error('title: ' + title);
+    const hero = await page.locator('.hero-title').innerText();
+    if (!hero.includes('your files') || !hero.includes('your way.')) throw new Error('hero: ' + hero);
+    if (await page.locator('a.nav-link[href="#/"]').count()) throw new Error('tools link still in nav');
+    if (!(await page.locator('a.nav-link[href="#/about"]').count())) throw new Error('about link missing');
+    if (await page.locator('footer a[href="#/"]').count()) throw new Error('tools link still in footer');
+    if (await page.locator('footer a[href="#/about"]').count()) throw new Error('about link still in footer');
+    if (!(await page.locator('footer a[href="https://harshbanker.com"]').count())) throw new Error('credit missing');
     await page.screenshot({ path: path.join(SHOTS, '01-home.png'), fullPage: true });
   });
 
@@ -300,7 +308,7 @@ async function makeFixtures() {
   await check('leaving a tool with files asks before discarding', async () => {
     await fresh('#/crop');
     await upload([path.join(FIXTURES, 'photo.jpg')]);
-    await page.click('a.nav-link[href="#/"]');
+    await page.click('a.wordmark');
     await page.waitForSelector('#leaveDialog[open]');
     const hashWhileAsking = await page.evaluate(() => location.hash);
     if (hashWhileAsking !== '#/crop') throw new Error('URL changed before confirming: ' + hashWhileAsking);
@@ -309,7 +317,7 @@ async function makeFixtures() {
     await page.waitForFunction(() => !document.querySelector('#leaveDialog').open);
     if ((await page.evaluate(() => location.hash)) !== '#/crop') throw new Error('stay did not restore');
     if ((await page.locator('.file-row').count()) !== 1) throw new Error('files were lost on stay');
-    await page.click('a.nav-link[href="#/"]');
+    await page.click('a.wordmark');
     await page.waitForSelector('#leaveDialog[open]');
     await page.click('#leaveBtn');
     await page.waitForFunction(() => location.hash === '#/' || location.hash === '');
@@ -378,6 +386,7 @@ async function makeFixtures() {
     await page.screenshot({ path: path.join(SHOTS, '02-crop.png'), fullPage: true });
     await run();
     const out = await downloadResult();
+    if (path.basename(out) !== 'photo-cropped-600x600.webp') throw new Error('name: ' + path.basename(out));
     const info = await imageInfo(out);
     if (!info.ok || info.width !== 600 || info.height !== 600) throw new Error(JSON.stringify(info));
     await page.screenshot({ path: path.join(SHOTS, '03-crop-result.png'), fullPage: true });
@@ -392,6 +401,7 @@ async function makeFixtures() {
     await page.waitForTimeout(300);
     await run();
     const out = await downloadResult();
+    if (path.basename(out) !== 'photo-cropped-600x600.webp') throw new Error('name: ' + path.basename(out));
     if (fs.statSync(out).size !== 60 * 1024) throw new Error('size ' + fs.statSync(out).size);
     const info = await imageInfo(out);
     if (!info.ok || info.width !== 600) throw new Error(JSON.stringify(info));
@@ -409,6 +419,7 @@ async function makeFixtures() {
     await page.waitForTimeout(300);
     await run();
     const out = await downloadResult();
+    if (path.basename(out) !== 'photo-cropped-350x450.jpg') throw new Error('name: ' + path.basename(out));
     if (fs.statSync(out).size !== 50 * 1024) throw new Error('size ' + fs.statSync(out).size);
     if (fs.readFileSync(out).subarray(0, 2).toString('hex') !== 'ffd8') throw new Error('not a JPEG');
     const info = await imageInfo(out);
@@ -427,6 +438,7 @@ async function makeFixtures() {
     const note = await page.locator('.file-status').innerText();
     if (!/PNG cannot meet a size target/.test(note)) throw new Error('note: ' + note);
     const out = await downloadResult();
+    if (!/^photo-cropped-\d+x\d+\.webp$/.test(path.basename(out))) throw new Error('name: ' + path.basename(out));
     if (fs.statSync(out).size !== 40 * 1024) throw new Error('size ' + fs.statSync(out).size);
   });
 
@@ -443,7 +455,7 @@ async function makeFixtures() {
     await page.waitForTimeout(300);
     await run();
     const out = await downloadResult();
-    if (!out.endsWith('.webp')) throw new Error('extension: ' + out);
+    if (path.basename(out) !== 'photo-converted.webp') throw new Error('name: ' + path.basename(out));
     if (fs.statSync(out).size !== 30 * 1024) throw new Error('size ' + fs.statSync(out).size);
   });
 
@@ -481,6 +493,9 @@ async function makeFixtures() {
     await download.saveAs(zip);
     const entries = zipEntries(zip, /\.(webp|jpg|jpeg|png|pdf)$/);
     if (entries.length !== 2) throw new Error('zip entries: ' + entries.length);
+    const listing = entries.join('\n');
+    if (!/photo-squeezed\.webp/.test(listing)) throw new Error('image name in zip');
+    if (!/report-squeezed\.pdf/.test(listing)) throw new Error('pdf name in zip');
     await page.screenshot({ path: path.join(SHOTS, '04-squeeze.png'), fullPage: true });
   });
 
@@ -503,7 +518,9 @@ async function makeFixtures() {
     await fresh('#/merge');
     await upload([path.join(FIXTURES, 'report.pdf'), path.join(FIXTURES, 'report2.pdf')]);
     await run();
-    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    const out = await downloadResult();
+    if (path.basename(out) !== 'opti-merged.pdf') throw new Error('name: ' + path.basename(out));
+    const info = await pdfInfo(fs.readFileSync(out));
     if (!info.ok || info.pages !== 6) throw new Error('pages ' + info.pages);
   });
 
@@ -515,6 +532,7 @@ async function makeFixtures() {
     await run();
     const entries = zipEntries(await downloadResult(), /\.pdf$/);
     if (entries.length !== 3) throw new Error('entries ' + entries.length);
+    if (!/report-split-1\.pdf/.test(entries.join('\n'))) throw new Error('split naming');
   });
 
   await check('split custom ranges', async () => {
@@ -532,7 +550,9 @@ async function makeFixtures() {
     await upload([path.join(FIXTURES, 'report.pdf')]);
     await page.fill('#pages', '1-2');
     await run();
-    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    const out = await downloadResult();
+    if (path.basename(out) !== 'report-extracted.pdf') throw new Error('name: ' + path.basename(out));
+    const info = await pdfInfo(fs.readFileSync(out));
     if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
   });
 
@@ -541,7 +561,9 @@ async function makeFixtures() {
     await upload([path.join(FIXTURES, 'report.pdf')]);
     await page.fill('#pages', '2');
     await run();
-    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    const out = await downloadResult();
+    if (path.basename(out) !== 'report-trimmed.pdf') throw new Error('name: ' + path.basename(out));
+    const info = await pdfInfo(fs.readFileSync(out));
     if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
   });
 
@@ -569,11 +591,23 @@ async function makeFixtures() {
     if (!rotation.every((angle) => angle === 90)) throw new Error('rotation ' + rotation.join(','));
   });
 
+  await check('compress PDF names the output', async () => {
+    await fresh('#/compress-pdf');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run();
+    const out = await downloadResult();
+    if (path.basename(out) !== 'report-compressed.pdf') throw new Error('name: ' + path.basename(out));
+    const info = await pdfInfo(fs.readFileSync(out));
+    if (!info.ok || info.pages !== 3) throw new Error('pages ' + info.pages);
+  });
+
   await check('images to PDF', async () => {
     await fresh('#/images-to-pdf');
     await upload([path.join(FIXTURES, 'photo.jpg'), path.join(FIXTURES, 'graphic.png')]);
     await run();
-    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    const out = await downloadResult();
+    if (path.basename(out) !== 'opti-images.pdf') throw new Error('name: ' + path.basename(out));
+    const info = await pdfInfo(fs.readFileSync(out));
     if (!info.ok || info.pages !== 2) throw new Error('pages ' + info.pages);
   });
 
@@ -672,6 +706,15 @@ async function makeFixtures() {
     await page.evaluate(() => localStorage.clear());
     await page.reload({ waitUntil: 'load' });
     await page.waitForTimeout(400);
+    const gutters = await page.evaluate(() => {
+      const shell = getComputedStyle(document.querySelector('.shell'));
+      const header = getComputedStyle(document.querySelector('.topbar-inner'));
+      const footer = getComputedStyle(document.querySelector('.site-footer'));
+      return [shell.paddingLeft, shell.paddingRight, header.paddingLeft, header.paddingRight,
+        footer.paddingLeft, footer.paddingRight, footer.textAlign];
+    });
+    if (gutters.slice(0, 6).some((value) => value !== '0px')) throw new Error('mobile gutters: ' + gutters.join(','));
+    if (gutters[6] !== 'center') throw new Error('footer not centered: ' + gutters[6]);
     await page.setInputFiles('#files-input', [path.join(FIXTURES, 'photo.jpg')]);
     await page.waitForTimeout(1400);
     await page.selectOption('#preset', 'us-passport');
@@ -681,9 +724,12 @@ async function makeFixtures() {
     await page.waitForFunction(() => !document.querySelector('#runBtn').textContent.includes('working'), null, {
       timeout: 120000
     });
+    await page.waitForTimeout(700);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     if (overflow > 1) throw new Error('horizontal overflow: ' + overflow);
     if (!(await page.locator('#resultZone .result').isVisible())) throw new Error('no result');
+    const focused = await page.evaluate(() => document.activeElement && document.activeElement.textContent.trim());
+    if (!/download/i.test(focused || '')) throw new Error('download not focused: ' + focused);
     await page.screenshot({ path: path.join(SHOTS, '07-mobile-result.png'), fullPage: true });
   });
 

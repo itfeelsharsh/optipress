@@ -1,12 +1,12 @@
 /**
- * OptiPress · app.js
+ * Opti · app.js
  * Hash-routed local file tools: images and PDFs, no uploads.
  */
 (function () {
   'use strict';
 
   var C = window.OptiCore;
-  var E = window.optiPressEngine;
+  var E = window.optiEngine;
   var P = window.OptiPdf;
   var Presets = window.OptiPresets;
 
@@ -21,7 +21,7 @@
   var pickerFilesEl = document.getElementById('pickerFiles');
   var leaveDialog = document.getElementById('leaveDialog');
 
-  var STORAGE = { settings: 'optipress:settings:v3', theme: 'optipress:theme:v2' };
+  var STORAGE = { settings: 'opti:settings:v3', theme: 'opti:theme:v2' };
   var LIMITS = { files: 80, bytes: 200 * 1024 * 1024 };
 
   var APP_DEFAULTS = {
@@ -239,9 +239,9 @@
     s.numberStart = Math.max(1, Math.round(Number(input.numberStart) || 1));
     s.numberSize = Math.round(C.clampNumber(input.numberSize === undefined ? 10 : input.numberSize, 6, 36));
     s.ocrDpi = [150, 200, 300].indexOf(Number(input.ocrDpi)) !== -1 ? Number(input.ocrDpi) : 200;
-    if (window.optiPressEngine) {
-      if (s.format === 'image/avif' && !window.optiPressEngine.supportsType('image/avif')) s.format = 'auto';
-      if (s.format === 'image/webp' && !window.optiPressEngine.supportsType('image/webp')) s.format = 'auto';
+    if (window.optiEngine) {
+      if (s.format === 'image/avif' && !window.optiEngine.supportsType('image/avif')) s.format = 'auto';
+      if (s.format === 'image/webp' && !window.optiEngine.supportsType('image/webp')) s.format = 'auto';
     }
     return s;
   }
@@ -691,11 +691,11 @@
   // ------------------------------------------------------------------ home --
 
   function renderHome() {
-    document.title = 'OptiPress — local file tools';
+    document.title = 'Opti — local file tools';
     main.innerHTML =
       '<section class="home">' +
         '<p class="privacy-line"><span class="dot" aria-hidden="true"></span>Everything runs in this tab. Your files are never uploaded.</p>' +
-        '<h1 class="hero-title"><span class="prompt">$</span> your files.<br><span class="prompt">$</span> your tab.<br><span class="prompt">$</span> no accounts.<span class="cursor" aria-hidden="true"></span></h1>' +
+        '<h1 class="hero-title"><span class="prompt">$</span> your files.<br><span class="prompt">$</span> your tab.<br><span class="prompt">$</span> your way.<span class="cursor" aria-hidden="true"></span></h1>' +
         uploaderHtml('home', {
           accept: 'all',
           multiple: true,
@@ -743,7 +743,7 @@
   }
 
   function renderAbout() {
-    document.title = 'About & privacy — OptiPress';
+    document.title = 'About & privacy — Opti';
     main.innerHTML =
       '<section class="tool">' +
         '<a class="back" href="#/">← all tools</a>' +
@@ -1079,6 +1079,26 @@
     setTimeout(function () {
       live.textContent = message;
     }, 30);
+  }
+
+  function revealResult(zone) {
+    if (!zone) return;
+    requestAnimationFrame(function () {
+      var button = zone.querySelector('.result .btn-primary');
+      if (button) {
+        try {
+          button.focus({ preventScroll: true });
+        } catch (err) {
+          button.focus();
+        }
+      }
+      try {
+        var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        zone.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+      } catch (err) {
+        zone.scrollIntoView();
+      }
+    });
   }
 
   function download(blob, filename) {
@@ -1530,7 +1550,7 @@
     return true;
   }
 
-  async function processImageItems(files, options, listEl, onItem, specific) {
+  async function processImageItems(files, options, listEl, onItem, specific, outputSuffix) {
     var targets = specific && specific.length ? specific : pendingItems(files);
     if (!targets.length) return [];
     var cursor = 0;
@@ -1567,6 +1587,10 @@
             }
           );
           if (!files.items.includes(item)) continue;
+          if (outputSuffix) {
+            var tag = typeof outputSuffix === 'function' ? outputSuffix(item, result) : outputSuffix;
+            result.fileName = C.outputFileName(item.name, result.mimeType || (item.meta && item.meta.mimeType) || 'image/jpeg', tag);
+          }
           item.status = 'done';
           item.progress = 100;
           item.result = result;
@@ -1636,7 +1660,7 @@
           var blob = await zipEntries(entries, function (percent) {
             zip.textContent = 'zip ' + Math.round(percent) + '%';
           });
-          download(blob, 'optipress-' + Date.now() + '.zip');
+          download(blob, 'opti-' + Date.now() + '.zip');
           toast('ZIP downloaded.', 'ok');
         } catch (err) {
           toast(err.message, 'error');
@@ -1715,9 +1739,10 @@
       files: new Files({ accept: 'all', multiple: true, onChange: null }),
       options: function () { return engineOptions(); },
       actionLabel: 'squeeze',
-      requireSupportedCustom: true
+      requireSupportedCustom: true,
+      outputSuffix: 'squeezed'
     });
-    document.title = 'Squeeze — OptiPress';
+    document.title = 'Squeeze — Opti';
   }
 
   function renderCrop(tool) {
@@ -1790,9 +1815,10 @@
       },
       actionLabel: 'crop & squeeze',
       requireSupportedCustom: true,
-      crop: true
+      crop: true,
+      outputSuffix: function (item, result) { return 'cropped-' + result.width + 'x' + result.height; }
     });
-    document.title = 'Crop & size — OptiPress';
+    document.title = 'Crop & size — Opti';
   }
 
   function renderConvert(tool) {
@@ -1826,9 +1852,10 @@
       files: new Files({ accept: 'images', multiple: true, onChange: null }),
       options: function () { return engineOptions(); },
       actionLabel: 'convert',
-      requireSupportedCustom: true
+      requireSupportedCustom: true,
+      outputSuffix: 'converted'
     });
-    document.title = 'Convert — OptiPress';
+    document.title = 'Convert — Opti';
   }
 
   function renderCompressPdf(tool) {
@@ -1863,9 +1890,10 @@
     mountImageTool({
       files: new Files({ accept: 'pdf', multiple: true, onChange: null }),
       options: function () { return engineOptions({ format: 'auto', targetEnabled: false }); },
-      actionLabel: 'compress'
+      actionLabel: 'compress',
+      outputSuffix: 'compressed'
     });
-    document.title = 'Compress PDF — OptiPress';
+    document.title = 'Compress PDF — Opti';
   }
 
   // ---------------------------------------------------- image tool mounting --
@@ -1971,10 +1999,23 @@
         renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
         showImageResults(resultZone, files, 'files');
         updateSummary(summary, files, estimates, measuring);
-        if (done.length) {
-          toast(done.length + ' file' + (done.length === 1 ? '' : 's') + ' done.', 'ok');
-          announce(done.length + ' files processed.');
+        var completed = files.items.filter(function (item) { return item.result && !item.stale; });
+        if (completed.length === 1) {
+          var only = completed[0];
+          toast(only.result.fileName + ' ready.', 'ok', {
+            label: 'download',
+            onClick: function () { download(only.result.blob, only.result.fileName); }
+          });
+          announce(only.result.fileName + ' ready to download.');
+        } else if (completed.length) {
+          var zipButton = resultZone.querySelector('.result .btn-primary');
+          toast(completed.length + ' files ready.', 'ok', zipButton ? {
+            label: 'zip',
+            onClick: function () { zipButton.click(); }
+          } : null);
+          announce(completed.length + ' files ready.');
         }
+        revealResult(resultZone);
         if (failed.length) toast(failed.length + ' failed — see the rows.', 'error');
       } catch (err) {
         runStatus.textContent = 'failed';
@@ -2430,8 +2471,22 @@
         if (!entries || !entries.length) throw new Error('Nothing was produced.');
         ctx.setProgress(100, 'done');
         ctx.showResult(entries, config.resultLabel || 'file');
-        toast((entries.length > 1 ? entries.length + ' files' : entries[0].fileName) + ' ready.', 'ok');
-        announce('File ready.');
+        if (entries.length === 1) {
+          var entry = entries[0];
+          toast(entry.fileName + ' ready.', 'ok', {
+            label: 'download',
+            onClick: function () { download(entry.blob, entry.fileName); }
+          });
+          announce(entry.fileName + ' ready to download.');
+        } else {
+          var zipButton = resultZone.querySelector('.result .btn-primary');
+          toast(entries.length + ' files ready.', 'ok', zipButton ? {
+            label: 'zip',
+            onClick: function () { zipButton.click(); }
+          } : null);
+          announce(entries.length + ' files ready.');
+        }
+        revealResult(resultZone);
       } catch (err) {
         ctx.showError(err && err.message ? err.message : 'Something went wrong.');
         runStatus.textContent = 'failed';
@@ -2489,7 +2544,7 @@
           var blob = await zipEntries(entries, function (percent) {
             zip.textContent = 'zip ' + Math.round(percent) + '%';
           });
-          download(blob, 'optipress-' + Date.now() + '.zip');
+          download(blob, 'opti-' + Date.now() + '.zip');
         } catch (err) {
           toast(err.message, 'error');
         } finally {
@@ -3347,21 +3402,57 @@
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
     if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
-    window.addEventListener('load', function () {
-      navigator.serviceWorker.register('./sw.js').then(function (registration) {
-        registration.addEventListener('updatefound', function () {
-          var installing = registration.installing;
-          if (!installing) return;
-          installing.addEventListener('statechange', function () {
-            if (installing.state === 'installed' && navigator.serviceWorker.controller) {
-              toast('A new build is ready.', null, {
-                label: 'reload',
-                onClick: function () { location.reload(); }
-              });
-            }
+
+    var hadController = !!navigator.serviceWorker.controller;
+    var reloading = false;
+    var updateNotified = false;
+
+    // skipWaiting + clients.claim in the worker means a new build takes control
+    // immediately. Reload only when no work can be lost.
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (reloading) return;
+      if (!hadController) {
+        hadController = true;
+        return;
+      }
+      if (app.busy || hasUnsavedChanges()) {
+        if (!updateNotified) {
+          updateNotified = true;
+          toast('A new version is ready. Reload when you are done.', null, {
+            label: 'reload',
+            onClick: function () { location.reload(); }
           });
+        }
+        return;
+      }
+      reloading = true;
+      location.reload();
+    });
+
+    function check(registration) {
+      if (!registration) return;
+      try {
+        var pending = registration.update();
+        if (pending && pending.catch) pending.catch(function () {});
+      } catch (err) {
+        /* offline is fine */
+      }
+    }
+
+    window.addEventListener('load', function () {
+      navigator.serviceWorker
+        .register('./sw.js', { updateViaCache: 'none' })
+        .then(function (registration) {
+          setTimeout(function () { check(registration); }, 1200);
+          setInterval(function () { check(registration); }, 10 * 60 * 1000);
+          document.addEventListener('visibilitychange', function () {
+            if (!document.hidden) check(registration);
+          });
+          window.addEventListener('online', function () { check(registration); });
+        })
+        .catch(function () {
+          /* offline support is optional */
         });
-      }).catch(function () { /* offline support is optional */ });
     });
   }
 
@@ -3507,7 +3598,7 @@
   };
 
   function renderTool(tool) {
-    document.title = tool.label + ' — OptiPress';
+    document.title = tool.label + ' — Opti';
     tool.view(tool);
   }
 })();

@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OptiPress — local file tools</title>
-  <meta name="description" content="Squeeze, crop, resize, convert and edit images and PDFs entirely in your browser. Exact file sizes, passport presets, merge, split, rotate, watermark and more. Nothing is uploaded.">
+  <title>Opti — local file tools</title>
+  <meta name="description" content="Opti squeezes, crops, converts and edits images and PDFs entirely in your browser. Exact file sizes, passport presets, merge, split, rotate, watermark and more. Nothing is uploaded.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f4f1ea">
 
   <meta property="og:type" content="website">
-  <meta property="og:title" content="OptiPress — local file tools">
+  <meta property="og:title" content="Opti — local file tools">
   <meta property="og:description" content="Squeeze, crop, convert and edit images and PDFs on your device. No uploads.">
 
   <script>
     (function () {
       try {
-        var t = localStorage.getItem('optipress:theme:v2');
+        var t = localStorage.getItem('opti:theme:v2');
         if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
       } catch (err) { /* private mode */ }
     })();
@@ -45,9 +45,8 @@
 
   <header class="topbar">
     <div class="topbar-inner">
-      <a class="wordmark" href="#/" aria-label="OptiPress — all tools">OptiPress</a>
+      <a class="wordmark" href="#/" aria-label="Opti — all tools">Opti</a>
       <nav class="topnav" aria-label="Primary">
-        <a class="nav-link" href="#/">all tools</a>
         <a class="nav-link" href="#/about">about &amp; privacy</a>
         <button type="button" class="theme-btn" id="themeToggle">theme: system</button>
       </nav>
@@ -59,13 +58,9 @@
   <footer class="site-footer">
     <p>Files are processed in this tab. Nothing is uploaded.</p>
     <p class="footer-links">
-      <a href="#/">all tools</a>
-      <span aria-hidden="true">·</span>
-      <a href="#/about">about &amp; privacy</a>
-      <span aria-hidden="true">·</span>
       <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">made by Harsh Banker</a>
       <span aria-hidden="true">·</span>
-      <span>v2.1</span>
+      <span>v2.2</span>
     </p>
   </footer>
 
@@ -129,7 +124,7 @@
   <p class="sr-only" id="liveStatus" role="status" aria-live="polite"></p>
 
   <noscript>
-    <p class="noscript">OptiPress needs JavaScript. Everything runs locally in your browser, so there is no server to fall back to.</p>
+    <p class="noscript">Opti needs JavaScript. Everything runs locally in your browser, so there is no server to fall back to.</p>
   </noscript>
 </body>
 </html>

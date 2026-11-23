@@ -1,5 +1,5 @@
 /**
- * OptiPress · compressor.js
+ * Opti · compressor.js
  * Client-side image / HEIC / PDF pipeline. Nothing leaves the device.
  */
 (function () {
@@ -31,7 +31,7 @@
     return err instanceof Error ? err : new Error(message);
   }
 
-  class OptiPressEngine {
+  class OptiEngine {
     constructor() {
       this._caps = null;
       this._pdfReady = false;
@@ -947,6 +947,6 @@
     return new Blob([bytes], { type: mime });
   }
 
-  window.OptiPressEngine = OptiPressEngine;
-  window.optiPressEngine = new OptiPressEngine();
+  window.OptiEngine = OptiEngine;
+  window.optiEngine = new OptiEngine();
 })();

@@ -61,5 +61,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, () => {
-  console.log('OptiPress → http://localhost:' + port + '  (root: ' + root + ')');
+  console.log('Opti → http://localhost:' + port + '  (root: ' + root + ')');
 });

@@ -1,5 +1,5 @@
 /**
- * OptiPress · presets.js
+ * Opti · presets.js
  * Crop / upload-size presets. Values are commonly cited requirements; the UI
  * always tells people to confirm with the issuing authority.
  */

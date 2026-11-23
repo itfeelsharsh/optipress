@@ -1,5 +1,5 @@
 /**
- * OptiPress · padding.js
+ * Opti · padding.js
  * Push an encoded file up to an exact byte budget using metadata that decoders
  * ignore (JPEG comment, PNG tEXt, WebP JUNK, AVIF free box, PDF comment, GIF
  * comment, SVG comment). Pure bytes in, pure bytes out — testable in Node.

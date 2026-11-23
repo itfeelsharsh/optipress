@@ -1,5 +1,5 @@
 /**
- * OptiPress · pdf-tools.js
+ * Opti · pdf-tools.js
  * Local PDF operations built on pdf-lib (with AES-256 support) and PDF.js.
  */
 (function (root, factory) {
@@ -20,7 +20,7 @@
     return window.pdfjsLib;
   }
   function Engine() {
-    return window.optiPressEngine;
+    return window.optiEngine;
   }
 
   function normalizeError(err) {
@@ -159,7 +159,7 @@
       progress(100, 'Merged');
       return {
         blob: this.blobFrom(bytes),
-        fileName: 'optipress-merged.pdf',
+        fileName: 'opti-merged.pdf',
         pages: out.getPageCount()
       };
     }
@@ -178,7 +178,7 @@
       progress(100, 'Done');
       return {
         blob: this.blobFrom(bytes),
-        fileName: downloadName(file.name, 'pages'),
+        fileName: downloadName(file.name, 'extracted'),
         pages: out.getPageCount()
       };
     }
@@ -190,7 +190,9 @@
       var keep = [];
       for (var i = 1; i <= total; i++) if (!remove.has(i)) keep.push(i);
       if (!keep.length) throw new Error('You cannot delete every page.');
-      return this.extract(file, keep, onProgress);
+      var result = await this.extract(file, keep, onProgress);
+      result.fileName = downloadName(file.name, 'trimmed');
+      return result;
     }
 
     async reorder(file, order, onProgress) {
@@ -249,7 +251,7 @@
         var base = Core().sanitizeBase(Core().baseName(file.name));
         results.push({
           blob: this.blobFrom(bytes),
-          fileName: base + '-part-' + (i + 1) + '.pdf',
+          fileName: base + '-split-' + (i + 1) + '.pdf',
           pages: parts[i].length
         });
         await yieldToUi();
@@ -310,7 +312,7 @@
       progress(100, 'Done');
       return {
         blob: this.blobFrom(pdfBytes),
-        fileName: 'optipress-images.pdf',
+        fileName: 'opti-images.pdf',
         pages: out.getPageCount()
       };
     }

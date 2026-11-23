@@ -1,6 +1,6 @@
-# OptiPress
+# Opti
 
-**Live:** https://optipress.harshbanker.com
+**Live:** https://opti.harshbanker.com · **v2.2**
 
 A local-first image and PDF workshop. Nothing is uploaded, nothing is tracked, and every tool runs in the browser tab.
 
@@ -8,7 +8,7 @@ A local-first image and PDF workshop. Nothing is uploaded, nothing is tracked, a
 
 - **Squeeze** — WebP/JPEG/PNG/AVIF output with a live estimate measured from real sample encodes.
 - **Crop & size** — crop-to-fill or fit-inside, with passport, visa, government-form, social and print presets. A live preview shows exactly what will be written.
-- **Exact file sizes** — request 400 KB and get 400 KB. OptiPress searches the highest quality under the cap, downsizes only when necessary, then pads with harmless metadata (JPEG comments, PNG `tEXt`, WebP `JUNK`, AVIF `free`, PDF comments) to land **byte-exact** on the limit.
+- **Exact file sizes** — request 400 KB and get 400 KB. Opti searches the highest quality under the cap, downsizes only when necessary, then pads with harmless metadata (JPEG comments, PNG `tEXt`, WebP `JUNK`, AVIF `free`, PDF comments) to land **byte-exact** on the limit.
 - **Custom MIME output** — type any `image/*` type the browser can encode. Unsupported types are detected and blocked before the run.
 - Transparency-aware output: WebP/PNG keep alpha; JPEG is matted white or black instead of turning black.
 
@@ -54,8 +54,8 @@ npm run preview      # serve dist/ on http://localhost:4173
 
 ## Deploy
 
-- **Vercel** — `vercel.json` builds `npm run build` and publishes `dist/`. The domain is `optipress.harshbanker.com`.
-- **GitHub Pages** — `.github/workflows/pages.yml` runs tests, builds and deploys on every push to `main`.
+- **Vercel** — `vercel.json` builds `npm run build` and publishes `dist/` to `opti.harshbanker.com`.
+- The service worker checks for updates and refreshes the app automatically when it is idle.
 
 ## Notes & limits
 

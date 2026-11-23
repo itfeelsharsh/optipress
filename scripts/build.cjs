@@ -36,9 +36,6 @@ fs.mkdirSync(dist, { recursive: true });
 for (const file of ['index.html', 'manifest.json']) {
   fs.copyFileSync(path.join(projectRoot, file), path.join(dist, file));
 }
-if (fs.existsSync(path.join(projectRoot, 'CNAME'))) {
-  fs.copyFileSync(path.join(projectRoot, 'CNAME'), path.join(dist, 'CNAME'));
-}
 for (const dir of ['assets', 'fonts', 'lib']) {
   copyDir(path.join(projectRoot, dir), path.join(dist, dir));
 }

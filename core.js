@@ -1,5 +1,5 @@
 /**
- * OptiPress · core.js
+ * Opti · core.js
  * Pure, dependency-free helpers shared by the compressor, the UI and the test suite.
  * No DOM access lives in this file.
  */

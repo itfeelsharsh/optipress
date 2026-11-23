@@ -1,7 +1,7 @@
 {
   "id": "./",
-  "name": "OptiPress — local file tools",
-  "short_name": "OptiPress",
+  "name": "Opti — local file tools",
+  "short_name": "Opti",
   "description": "Squeeze, crop, convert and edit images and PDFs entirely on your device. Exact sizes, passport presets and a full PDF studio. Nothing is uploaded.",
   "start_url": "./",
   "scope": "./",

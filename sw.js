@@ -1,6 +1,6 @@
-/* OptiPress service worker — offline-first, but never stale HTML. */
+/* Opti service worker — offline-first, but never stale HTML. */
 const CACHE_VERSION = '__BUILD__';
-const CACHE_NAME = 'optipress-' + CACHE_VERSION;
+const CACHE_NAME = 'opti-' + CACHE_VERSION;
 
 const CORE_ASSETS = [
   './',
@@ -44,7 +44,7 @@ self.addEventListener('activate', (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((key) => key.startsWith('optipress-') && key !== CACHE_NAME)
+            .filter((key) => (key.startsWith('opti-') || key.startsWith('optipress-')) && key !== CACHE_NAME)
             .map((key) => caches.delete(key))
         )
       )

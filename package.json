@@ -1,6 +1,6 @@
 {
-  "name": "optipress",
-  "version": "2.1.0",
+  "name": "opti",
+  "version": "2.2.0",
   "private": true,
   "description": "Private, on-device PDF and image compressor. No uploads.",
   "scripts": {
