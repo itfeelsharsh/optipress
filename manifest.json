@@ -1,13 +1,17 @@
 {
-  "name": "OptiPress Fruity 🍊 PDF & Image Compressor",
+  "id": "./",
+  "name": "OptiPress — private file squeezer",
   "short_name": "OptiPress",
-  "description": "100% Private, Local Browser PDF & Image Compressor. Works 100% offline with zero server uploads.",
-  "start_url": "./index.html",
+  "description": "Compress PDF, HEIC, PNG, JPEG, WebP and AVIF files in your browser. Nothing is uploaded.",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
   "orientation": "any",
-  "background_color": "#fffdf2",
-  "theme_color": "#ff6b00",
+  "background_color": "#faf7f0",
+  "theme_color": "#faf7f0",
+  "lang": "en",
+  "dir": "ltr",
   "categories": ["utilities", "productivity", "graphics"],
   "icons": [
     {
@@ -27,6 +31,13 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Open the squeezer",
+      "url": "./",
+      "description": "Drop files and compress them locally"
     }
   ]
 }

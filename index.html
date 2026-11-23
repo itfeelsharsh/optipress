@@ -3,291 +3,414 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OptiPress Fruity 🍊 - Fresh & Local PDF & Image Compression</title>
-  <meta name="description" content="Squeeze your PDF, HEIC, PNG, JPEG, and WebP files fresh! 100% private, local browser compression with live size estimation and zero server uploads.">
+  <title>OptiPress — squeeze PDFs &amp; images, on your device</title>
+  <meta name="description" content="A calm, private compressor for PDF, HEIC, PNG, JPEG, WebP and AVIF files. Real size estimates, batch squeezing, ZIP downloads. Nothing is uploaded.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#faf7f0">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="OptiPress — squeeze files, keep them private">
+  <meta property="og:description" content="PDF, HEIC, PNG, JPEG, WebP and AVIF compression that runs entirely in your browser.">
+
   <link rel="stylesheet" href="styles.css">
-  
-  <!-- PWA & Mobile Meta Tags -->
-  <meta name="theme-color" content="#ff6b00">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 
-  <!-- Local Bundled Processing Libraries (100% Offline Compatible) -->
-  <script src="lib/pdf.min.js"></script>
-  <script src="lib/pdf-lib.min.js"></script>
-  <script src="lib/heic2any.min.js"></script>
-  <script src="lib/jszip.min.js"></script>
+  <link rel="preload" href="fonts/fraunces-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
+
+  <script defer src="lib/pdf.min.js"></script>
+  <script defer src="lib/pdf-lib.min.js"></script>
+  <script defer src="lib/heic2any.min.js"></script>
+  <script defer src="lib/jszip.min.js"></script>
+  <script defer src="core.js"></script>
+  <script defer src="compressor.js"></script>
+  <script defer src="app.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
 
-  <!-- Animated Floating Fruit Background Elements -->
-  <div class="bg-decorations" aria-hidden="true">
-    <div class="fruit-blob blob-1"></div>
-    <div class="fruit-blob blob-2"></div>
-    <div class="fruit-blob blob-3"></div>
-    <div class="floating-sticker sticker-1">🍊</div>
-    <div class="floating-sticker sticker-2">🍋</div>
-    <div class="floating-sticker sticker-3">🍓</div>
-    <div class="floating-sticker sticker-4">🍈</div>
-    <div class="floating-sticker sticker-5">🍇</div>
-    <div class="floating-sticker sticker-6">🍉</div>
-  </div>
+  <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-logo" viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="13.1" fill="none" stroke="currentColor" stroke-width="2.1"/>
+      <circle cx="16" cy="16" r="9.3" fill="none" stroke="currentColor" stroke-width="1" opacity=".45"/>
+      <path d="M16 6.7v18.6M6.7 16h18.6M9.43 9.43l13.14 13.14M22.57 9.43L9.43 22.57" stroke="currentColor" stroke-width="1.2" opacity=".72"/>
+      <circle cx="16" cy="16" r="1.7" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24">
+      <rect x="4.5" y="10.5" width="15" height="10" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      <circle cx="12" cy="15.6" r="1.2" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4.1" fill="none" stroke="currentColor" stroke-width="1.7"/>
+      <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.6 1.6M17 17l1.6 1.6M18.6 5.4L17 7M7 17l-1.6 1.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24">
+      <path d="M20 14.4A8.4 8.4 0 0 1 9.6 4 8.4 8.4 0 1 0 20 14.4Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24">
+      <path d="M12 15.6V4.2m0 0L7.8 8.4M12 4.2l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4.4 15.4v2.4a2.2 2.2 0 0 0 2.2 2.2h10.8a2.2 2.2 0 0 0 2.2-2.2v-2.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M12 4.2v11.4m0 0 4.2-4.2M12 15.6 7.8 11.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4.4 15.4v2.4a2.2 2.2 0 0 0 2.2 2.2h10.8a2.2 2.2 0 0 0 2.2-2.2v-2.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-x" viewBox="0 0 24 24">
+      <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24">
+      <path d="M4.6 7h14.8M9.4 7V5.2a1.4 1.4 0 0 1 1.4-1.4h2.4a1.4 1.4 0 0 1 1.4 1.4V7M6.6 7l.8 12a1.8 1.8 0 0 0 1.8 1.7h5.6a1.8 1.8 0 0 0 1.8-1.7l.8-12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M10.2 11v5.6M13.8 11v5.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24">
+      <path d="M12 3.4v17.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      <path d="M7.9 7.4 4.4 10.9l3.5 3.5M16.1 7.4l3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <path d="M19.2 12a7.2 7.2 0 1 1-2.3-5.3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+      <path d="M19.6 4.4v4.4h-4.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-image" viewBox="0 0 24 24">
+      <rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="9" cy="9.6" r="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <path d="m5.4 17.8 4.6-4.9 3.2 3.2 2.5-2.6 3 3.1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24">
+      <path d="M6.2 3.6h7.3l4.3 4.3v12.5H6.2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M13.2 3.8v4.4h4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M9 12.4h6M9 15.6h4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24">
+      <path d="M3.8 7.6h16.4v11.2a1.8 1.8 0 0 1-1.8 1.8H5.6a1.8 1.8 0 0 1-1.8-1.8Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M3 4.6h18v3H3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M10 11.4h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-target" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="12" cy="12" r="4.1" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="12" cy="12" r="1.2" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-leaf" viewBox="0 0 24 24">
+      <path d="M20 4.4c0 8-4.7 12.6-11.4 12.6H5.2C5.2 9.4 10.2 4.4 20 4.4Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M4.2 20.2c1.8-4.5 5.2-7.6 9.8-9.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24">
+      <path d="m6.4 9.2 5.6 5.6 5.6-5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-knob" viewBox="0 0 24 24">
+      <path d="M9.4 6.6 5.2 12l4.2 5.4M14.6 6.6 18.8 12l-4.2 5.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24">
+      <path d="m4.8 12.6 4.6 4.6L19.4 7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24">
+      <path d="M12 4.2 21 19.4H3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M12 9.4v4.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      <circle cx="12" cy="16.7" r="1" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24">
+      <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+  </svg>
 
-  <!-- Top App Header -->
   <header class="app-header">
-    <div class="header-container">
+    <div class="header-inner">
       <div class="brand">
-        <div class="brand-icon">
-          <span>🍊</span>
-        </div>
-        <div class="brand-text">
-          <h1 class="brand-title">OptiPress Fruity</h1>
-          <p class="brand-subtitle">Squeeze Your Files Fresh & Local!</p>
-        </div>
-        <span class="brand-badge">✨ 100% Fresh & Private</span>
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"></use></svg></span>
+        <span class="brand-text">
+          <span class="brand-word">OptiPress</span>
+          <span class="brand-tag">Files, freshly pressed.</span>
+        </span>
       </div>
 
-      <div class="header-meta">
-        <button id="pwaInstallBtn" class="btn btn-secondary pwa-install-btn" style="display: none;">
-          <span>Install App</span>
+      <div class="header-actions">
+        <span class="privacy-chip" title="Every file is processed in this browser tab">
+          <svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <span>On-device</span>
+        </span>
+        <button type="button" class="icon-btn theme-toggle" id="themeToggle" aria-label="Switch to dark theme" aria-pressed="false">
+          <svg class="icon icon-sun" aria-hidden="true"><use href="#i-sun"></use></svg>
+          <svg class="icon icon-moon" aria-hidden="true"><use href="#i-moon"></use></svg>
         </button>
+        <button type="button" class="btn btn-quiet install-btn" id="installBtn" hidden>Install app</button>
       </div>
     </div>
   </header>
 
-  <!-- Main Grid Dashboard -->
-  <main class="main-layout">
+  <main class="app" id="main">
+    <section class="workspace" id="workspace" aria-label="Files">
+      <input type="file" id="fileInput" multiple accept=".pdf,.heic,.heif,image/png,image/jpeg,image/webp,image/avif,image/gif,image/bmp,image/svg+xml" hidden>
 
-    <!-- Left Controls Panel -->
-    <aside class="fruity-panel">
-      <h2 class="panel-title">
-
-        Squeeze Tuning
-      </h2>
-
-      <!-- Preset Selector Buttons -->
-      <div class="preset-group">
-        <button class="preset-btn" data-preset="lossless">
-          <span class="preset-emoji">🍏</span>
-          <span>Mild</span>
-        </button>
-        <button class="preset-btn active" data-preset="balanced">
-          <span class="preset-emoji">🍊</span>
-          <span>Juicy</span>
-        </button>
-        <button class="preset-btn" data-preset="maximum">
-          <span class="preset-emoji">🍋</span>
-          <span>Super Squeeze</span>
-        </button>
-      </div>
-
-      <!-- Quality Slider -->
-      <div class="control-item">
-        <div class="control-label-row">
-          <span>Quality Level</span>
-          <span id="qualityVal" class="control-value">75%</span>
-        </div>
-        <input type="range" id="qualityRange" min="5" max="100" value="75" class="fruit-slider slider-orange">
-      </div>
-
-      <!-- Image Dimensions Mode Selector & Controls -->
-      <div class="control-item">
-        <div class="control-label-row">
-          <span>Image Dimensions</span>
-          <span id="scaleVal" class="control-value">100%</span>
-        </div>
-
-        <!-- Mode Toggle Tabs (Scale vs Custom) -->
-        <div class="dim-mode-switch">
-          <button type="button" class="dim-tab-btn active" id="dimModeScaleBtn" data-mode="scale">
-            <span>📏 Scale (%)</span>
-          </button>
-          <button type="button" class="dim-tab-btn" id="dimModeCustomBtn" data-mode="custom">
-            <span>📐 Custom (px)</span>
-          </button>
-        </div>
-
-        <!-- Scale (%) Slider Container -->
-        <div id="scaleModeContainer" class="dim-mode-panel active">
-          <input type="range" id="scaleRange" min="20" max="100" value="100" step="5" class="fruit-slider slider-lime">
-        </div>
-
-        <!-- Custom (px) Dimensions Container -->
-        <div id="customModeContainer" class="dim-mode-panel" style="display: none;">
-          <div class="custom-dim-grid">
-            <div class="dim-input-group">
-              <label for="customWidth" class="dim-sublabel">Width (px)</label>
-              <input type="number" id="customWidth" class="text-input dim-number-input" placeholder="e.g. 1200" min="1" max="15000">
-            </div>
-            
-            <button type="button" id="lockAspectBtn" class="dim-lock-btn active" title="Toggle Aspect Ratio Lock">
-              <span id="lockIcon">🔒</span>
-            </button>
-
-            <div class="dim-input-group">
-              <label for="customHeight" class="dim-sublabel">Height (px)</label>
-              <input type="number" id="customHeight" class="text-input dim-number-input" placeholder="e.g. 800" min="1" max="15000">
-            </div>
-          </div>
-
-          <!-- Centering Background Color Selector -->
-          <div class="bg-choice-wrapper">
-            <div class="bg-choice-label-row">
-              <span class="dim-sublabel">Background (if image centered):</span>
-            </div>
-            <div class="bg-choice-group">
-              <button type="button" class="bg-choice-btn active" data-color="white" id="bgWhiteBtn">
-                <span class="color-dot white-dot"></span>
-                <span>White</span>
-              </button>
-              <button type="button" class="bg-choice-btn" data-color="black" id="bgBlackBtn">
-                <span class="color-dot black-dot"></span>
-                <span>Black</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Contextual Warning Notice Box -->
-          <div id="dimensionWarningBox" class="dim-warning-box">
-            <span class="warning-icon" id="dimWarningIcon">💡</span>
-            <div class="warning-text" id="dimWarningText">
-              If target aspect ratio differs from image, it will be centered on the chosen background to avoid distortion.
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- PDF Resolution Target DPI -->
-      <div class="control-item">
-        <div class="control-label-row">
-          <span>PDF Crispness (DPI)</span>
-        </div>
-        <select id="pdfDpiSelect" class="select-input">
-          <option value="72">72 DPI (Super Compact / Email)</option>
-          <option value="150" selected>150 DPI (Juicy Web Standard)</option>
-          <option value="200">200 DPI (High Detail Print)</option>
-          <option value="300">300 DPI (Pure Crystal Quality)</option>
-        </select>
-      </div>
-
-      <!-- Output Format Selector -->
-      <div class="control-item">
-        <div class="control-label-row">
-          <span>Output Format</span>
-        </div>
-        <select id="formatSelect" class="select-input">
-          <option value="original" selected>Auto Match Original</option>
-          <option value="image/webp">WebP (Next-Gen High Efficiency)</option>
-          <option value="image/jpeg">JPEG (Universal Compatibility)</option>
-          <option value="image/png">PNG (Preserve Transparency)</option>
-        </select>
-      </div>
-
-      <!-- Custom Target Size Sub-Card -->
-      <div class="target-size-card">
-        <div class="toggle-row">
-          <span class="target-title">Strict Target File Size</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="targetSizeToggle">
-            <span class="slider-round"></span>
-          </label>
-        </div>
-        <div id="targetSizeInputRow" style="display: none;" class="control-item">
-          <input type="number" id="targetSizeKB" class="text-input" placeholder="Enter target KB (e.g. 500)" value="500">
-        </div>
-      </div>
-
-      <!-- Live Dynamic Estimator -->
-      <div class="estimator-box">
-        <div class="estimator-header">
-          Live Juice Estimator
-        </div>
-        <div class="estimator-stats">
-          <span id="estSize" class="estimator-val">~450 KB</span>
-          <span id="estSavings" class="estimator-saving">-55% Savings</span>
-        </div>
-      </div>
-
-    </aside>
-
-    <!-- Right Content Dashboard -->
-    <section class="dropzone-container">
-
-      <!-- Small Upload Button (Mobile Only) -->
-      <button id="mobileUploadBtn" class="btn btn-primary mobile-upload-btn">
-        <span>Select PDF or Images</span>
+      <button type="button" class="dropzone" id="dropzone">
+        <span class="dropzone-art" aria-hidden="true">
+          <svg viewBox="0 0 220 220" fill="none">
+            <circle cx="205" cy="15" r="86" stroke="currentColor" stroke-width="1.5" opacity=".5"/>
+            <circle cx="205" cy="15" r="120" stroke="currentColor" stroke-width="1.5" opacity=".32"/>
+            <circle cx="205" cy="15" r="154" stroke="currentColor" stroke-width="1.5" opacity=".18"/>
+          </svg>
+        </span>
+        <span class="dropzone-icon" aria-hidden="true"><svg class="icon"><use href="#i-upload"></use></svg></span>
+        <span class="dropzone-title">Drop files to squeeze</span>
+        <span class="dropzone-sub">PDF, HEIC, PNG, JPEG, WebP, AVIF, GIF — up to 200&nbsp;MB each</span>
+        <span class="dropzone-cta">Choose files</span>
+        <span class="dropzone-foot">or drag them anywhere on this page · <kbd>⌘</kbd><kbd>V</kbd> to paste a screenshot</span>
       </button>
 
-      <!-- Drag & Drop Zone (Desktop Only) -->
-      <div id="dropzone" class="dropzone">
-        <input type="file" id="fileInput" multiple accept="image/*,.heic,.heif,.pdf" style="display: none;">
-        <div class="dropzone-icon-wrapper">
-          <div class="dropzone-fruit-icon">🍉</div>
-          <div class="dropzone-pulse"></div>
-        </div>
-        <h3 class="dropzone-title">Drop PDF or Images Here to Squeeze</h3>
-        <p class="dropzone-sub">or click anywhere to browse from your device</p>
-        <div class="supported-tags">
-          <span class="tag tag-pdf">PDF</span>
-          <span class="tag tag-heic">HEIC / HEIF</span>
-          <span class="tag tag-png">PNG</span>
-          <span class="tag tag-jpeg">JPEG</span>
-          <span class="tag tag-webp">WEBP</span>
-          <span class="tag tag-avif">AVIF</span>
-        </div>
-      </div>
+      <ul class="value-strip" id="valueStrip">
+        <li>
+          <svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          <span><strong>Never uploaded</strong>Files stay in this tab. Works offline too.</span>
+        </li>
+        <li>
+          <svg class="icon" aria-hidden="true"><use href="#i-archive"></use></svg>
+          <span><strong>Batch &amp; ZIP</strong>Queue a folder, download one archive.</span>
+        </li>
+        <li>
+          <svg class="icon" aria-hidden="true"><use href="#i-target"></use></svg>
+          <span><strong>Measured, not guessed</strong>Estimates come from real encodes.</span>
+        </li>
+      </ul>
 
-      <!-- File Queue & Actions Section -->
-      <div id="queueSection" style="display: none; flex-direction: column; gap: 1.25rem;">
-        <div class="queue-header">
-          <div class="queue-title">
-            Juice Basket <span id="queueBadge" class="badge-count">0 Files</span>
+      <section class="queue" id="queue" aria-label="Squeeze queue" hidden>
+        <header class="queue-head">
+          <div class="queue-heading">
+            <h2 class="queue-title">Basket <span class="count" id="queueCount">0</span></h2>
+            <p class="queue-sub" id="queueSummary">No files yet</p>
           </div>
-          <div class="action-bar">
-            <button id="clearBtn" class="btn btn-danger">
-              <span>🗑️ Clear Basket</span>
+          <div class="queue-actions">
+            <button type="button" class="btn btn-quiet" id="addBtn">
+              <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+              Add files
             </button>
-            <button id="compressAllBtn" class="btn btn-primary">
-              <span class="btn-icon">⚡</span>
-              <span>Squeeze All Now</span>
+            <button type="button" class="btn btn-quiet" id="clearBtn">Clear</button>
+            <button type="button" class="btn btn-secondary" id="zipBtn" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-archive"></use></svg>
+              <span id="zipLabel">ZIP</span>
             </button>
-            <button id="downloadZipBtn" class="btn btn-secondary" style="display: none;">
-              <span class="btn-icon">📦</span>
-              <span>Download ZIP Basket</span>
+            <button type="button" class="btn btn-primary" id="squeezeBtn" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#i-leaf"></use></svg>
+              <span id="squeezeLabel">Squeeze all</span>
             </button>
           </div>
-        </div>
+        </header>
 
-        <div id="fileList" class="file-list"></div>
-      </div>
-
+        <ul class="file-list" id="fileList"></ul>
+        <p class="queue-foot">
+          <svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+          EXIF metadata — including GPS — is stripped from squeezed photos.
+        </p>
+      </section>
     </section>
 
-  </main>
+    <aside class="rail" aria-label="Squeeze settings">
+      <form class="panel" id="settingsForm" novalidate>
+        <header class="panel-head">
+          <h2 class="panel-title">Squeeze settings</h2>
+          <button type="button" class="link-btn" id="resetBtn">Reset</button>
+        </header>
 
-  <!-- Side-by-side Quality Comparison Modal -->
-  <div id="compareModal" class="modal-overlay">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3 class="modal-title">🍊 Side-by-Side Quality Inspector</h3>
-        <button id="closeModalBtn" class="icon-btn close-btn">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div class="comparison-wrapper" id="compareWrapper">
-          <span class="comparison-badge left">Original (Raw)</span>
-          <span class="comparison-badge right">Compressed (Fresh Squeezed)</span>
-          <img id="compressedImgPreview" class="comparison-image" src="" alt="Compressed">
-          <img id="originalImgPreview" class="comparison-overlay-img" src="" alt="Original">
-          <div id="compareHandle" class="comparison-handle">
-            <div class="handle-pill">↔</div>
+        <div class="field">
+          <div class="field-head">
+            <span class="field-label" id="presetLabel">Preset</span>
+          </div>
+          <div class="segmented" role="radiogroup" aria-labelledby="presetLabel" id="presetGroup">
+            <button type="button" class="seg" role="radio" aria-checked="false" data-preset="mild" tabindex="-1">
+              <span class="seg-dot dot-leaf" aria-hidden="true"></span>Mild
+            </button>
+            <button type="button" class="seg" role="radio" aria-checked="true" data-preset="juicy" tabindex="0">
+              <span class="seg-dot dot-citrus" aria-hidden="true"></span>Juicy
+            </button>
+            <button type="button" class="seg" role="radio" aria-checked="false" data-preset="max" tabindex="-1">
+              <span class="seg-dot dot-berry" aria-hidden="true"></span>Max
+            </button>
+          </div>
+          <p class="field-hint" id="presetHint">The everyday squeeze. Big savings, no visible softness on screen.</p>
+        </div>
+
+        <div class="field" id="qualityField">
+          <div class="field-head">
+            <label class="field-label" for="quality">Quality</label>
+            <span class="value-chip" id="qualityOut">78</span>
+          </div>
+          <input type="range" class="range" id="quality" min="5" max="100" step="1" value="78">
+          <div class="range-scale"><span>Smaller</span><span>Sharper</span></div>
+        </div>
+
+        <div class="field" id="resizeField">
+          <div class="field-head">
+            <span class="field-label">Resize</span>
+            <span class="value-chip" id="resizeOut">100%</span>
+          </div>
+          <div class="segmented segmented-sm" role="radiogroup" aria-label="Resize mode" id="resizeGroup">
+            <button type="button" class="seg" role="radio" aria-checked="true" data-resize="scale" tabindex="0">Scale</button>
+            <button type="button" class="seg" role="radio" aria-checked="false" data-resize="exact" tabindex="-1">Exact px</button>
+          </div>
+
+          <div class="sub-panel" id="scaleControls">
+            <input type="range" class="range" id="scale" min="20" max="100" step="5" value="100" aria-label="Scale percentage">
+            <div class="range-scale"><span>20%</span><span>100%</span></div>
+          </div>
+
+          <div class="sub-panel" id="exactControls" hidden>
+            <div class="exact-grid">
+              <label class="input-label" for="customWidth">Width
+                <input type="number" class="text-input" id="customWidth" inputmode="numeric" min="1" max="20000" step="1" placeholder="auto">
+              </label>
+              <button type="button" class="lock-btn is-active" id="aspectLock" aria-pressed="true" aria-label="Aspect ratio locked" title="Lock aspect ratio">
+                <svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg>
+              </button>
+              <label class="input-label" for="customHeight">Height
+                <input type="number" class="text-input" id="customHeight" inputmode="numeric" min="1" max="20000" step="1" placeholder="auto">
+              </label>
+            </div>
+
+            <div class="inline-row">
+              <span class="inline-label">Letterbox</span>
+              <div class="swatches" role="radiogroup" aria-label="Letterbox background" id="letterboxGroup">
+                <button type="button" class="swatch" role="radio" aria-checked="true" data-letterbox="white" tabindex="0">
+                  <span class="swatch-dot swatch-white" aria-hidden="true"></span>White
+                </button>
+                <button type="button" class="swatch" role="radio" aria-checked="false" data-letterbox="black" tabindex="-1">
+                  <span class="swatch-dot swatch-black" aria-hidden="true"></span>Black
+                </button>
+              </div>
+            </div>
+            <p class="field-hint" id="exactHint">Matching ratios resize directly. Others are fitted and centred on the letterbox colour.</p>
           </div>
         </div>
+
+        <div class="field" id="formatField">
+          <div class="field-head">
+            <label class="field-label" for="format">Output format</label>
+          </div>
+          <div class="select-wrap">
+            <select class="select" id="format">
+              <option value="auto">Auto — best ratio (WebP)</option>
+              <option value="original">Keep original format</option>
+              <option value="image/webp">WebP</option>
+              <option value="image/jpeg">JPEG</option>
+              <option value="image/png">PNG (lossless, larger)</option>
+              <option value="image/avif" id="avifOption" hidden>AVIF</option>
+            </select>
+            <svg class="icon select-caret" aria-hidden="true"><use href="#i-chevron"></use></svg>
+          </div>
+          <p class="field-hint" id="formatHint">WebP is 25–35% smaller than JPEG at the same quality.</p>
+        </div>
+
+        <div class="field" id="pdfField" hidden>
+          <div class="field-head">
+            <label class="field-label" for="pdfMode">PDF engine</label>
+          </div>
+          <div class="select-wrap">
+            <select class="select" id="pdfMode">
+              <option value="raster">Rasterize pages — smallest</option>
+              <option value="structure">Keep text selectable — safe</option>
+            </select>
+            <svg class="icon select-caret" aria-hidden="true"><use href="#i-chevron"></use></svg>
+          </div>
+
+          <div id="pdfDpiRow">
+            <label class="input-label select-label" for="pdfDpi">Page resolution</label>
+            <div class="select-wrap">
+              <select class="select" id="pdfDpi">
+                <option value="72">72 DPI — email</option>
+                <option value="150" selected>150 DPI — screen</option>
+                <option value="200">200 DPI — detail</option>
+                <option value="300">300 DPI — print</option>
+              </select>
+              <svg class="icon select-caret" aria-hidden="true"><use href="#i-chevron"></use></svg>
+            </div>
+          </div>
+          <p class="field-hint" id="pdfHint">Rasterizing flattens text into images. Switch to “Keep text” if the PDF must stay selectable.</p>
+        </div>
+
+        <div class="field" id="targetField">
+          <div class="field-head">
+            <span class="field-label" id="targetLabel">Target file size</span>
+            <label class="switch">
+              <input type="checkbox" id="targetToggle" aria-labelledby="targetLabel">
+              <span class="switch-track" aria-hidden="true"></span>
+            </label>
+          </div>
+          <div class="sub-panel" id="targetControls" hidden>
+            <div class="unit-input">
+              <input type="number" class="text-input" id="targetKB" inputmode="numeric" min="10" max="200000" step="10" value="500" aria-label="Target size in kilobytes">
+              <span class="unit">KB</span>
+            </div>
+            <p class="field-hint" id="targetHint">Images only. Quality drops, then dimensions, until the file fits.</p>
+          </div>
+        </div>
+      </form>
+
+      <section class="summary" id="summary" aria-labelledby="summaryTitle">
+        <div class="summary-top">
+          <h2 class="summary-title" id="summaryTitle">Estimated output</h2>
+          <span class="pill" id="estimatePill">—</span>
+        </div>
+        <p class="summary-value" id="estimateValue">—</p>
+        <div class="meter" aria-hidden="true"><span class="meter-fill" id="estimateMeter"></span></div>
+        <p class="summary-note" id="estimateNote">Add files to see a live estimate.</p>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="app-footer">
+    <p><strong>OptiPress</strong> compresses in this tab. No uploads, no accounts, no tracking.</p>
+    <p class="footer-meta">
+      <span id="protocolHint" hidden>Served from a file — PDF tools need http(s).</span>
+      <span>v<span id="appVersion">2.0</span></span>
+    </p>
+  </footer>
+
+  <div class="modal" id="compareModal" role="dialog" aria-modal="true" aria-labelledby="compareTitle" hidden>
+    <div class="modal-card">
+      <header class="modal-head">
+        <div class="modal-heading">
+          <h2 class="modal-title" id="compareTitle">Quality check</h2>
+          <p class="modal-sub" id="compareFile">—</p>
+        </div>
+        <button type="button" class="icon-btn" id="closeModalBtn" aria-label="Close comparison">
+          <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+        </button>
+      </header>
+
+      <div class="compare" id="compareArea">
+        <img class="compare-img" id="compareAfter" alt="Squeezed result">
+        <div class="compare-before" id="compareBeforeLayer">
+          <img class="compare-img" id="compareBefore" alt="Original file">
+        </div>
+        <div class="compare-divider" id="compareDivider">
+          <span class="compare-knob" id="compareKnob" role="slider" tabindex="0" aria-label="Comparison position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+            <svg class="icon" aria-hidden="true"><use href="#i-knob"></use></svg>
+          </span>
+        </div>
+        <span class="compare-tag compare-tag-left">Original</span>
+        <span class="compare-tag compare-tag-right">Squeezed</span>
       </div>
+
+      <dl class="compare-meta">
+        <div><dt>Original</dt><dd id="metaBefore">—</dd></div>
+        <div><dt>Squeezed</dt><dd id="metaAfter">—</dd></div>
+        <div><dt>Saved</dt><dd id="metaSaved">—</dd></div>
+      </dl>
     </div>
   </div>
 
-  <script src="compressor.js"></script>
-  <script src="app.js"></script>
+  <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
+    <div class="drop-overlay-card">
+      <svg class="icon" aria-hidden="true"><use href="#i-upload"></use></svg>
+      <p>Drop to add files</p>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+  <p class="sr-only" id="liveStatus" role="status" aria-live="polite"></p>
+
+  <noscript>
+    <p class="noscript">OptiPress needs JavaScript to compress files locally in your browser.</p>
+  </noscript>
 </body>
 </html>
