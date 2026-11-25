@@ -58,6 +58,16 @@ for (const file of cssFiles) {
   fs.writeFileSync(path.join(dist, file), output);
 }
 
+for (const file of [
+  'lib/ocr/tesseract.min.js',
+  'lib/ocr/worker.min.js',
+  'lib/ocr/core/tesseract-core-simd-lstm.wasm.js',
+  'lib/ocr/lang/eng.traineddata.gz'
+]) {
+  const full = path.join(projectRoot, file);
+  if (fs.existsSync(full)) hash.update(fs.readFileSync(full));
+}
+
 const buildId = hash.digest('hex').slice(0, 10);
 
 const swSource = fs.readFileSync(path.join(projectRoot, 'sw.js'), 'utf8');

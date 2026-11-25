@@ -426,7 +426,7 @@
         : base.pdfDpi,
       targetEnabled: !!input.targetEnabled,
       targetMode: input.targetMode === 'atMost' ? 'atMost' : 'exact',
-      targetKB: Math.round(clampNumber(input.targetKB === undefined ? base.targetKB : input.targetKB, 10, 200000))
+      targetKB: Math.round(clampNumber(input.targetKB === undefined ? base.targetKB : input.targetKB, 0, 200000))
     };
     if (!PRESETS[out.preset]) out.preset = 'custom';
     return out;

@@ -753,7 +753,7 @@
         '<div class="tool-layout">' +
           '<div class="col-main">' +
             '<div class="panel"><h2 class="panel-title">privacy</h2>' +
-              '<p class="hint">Files are decoded, re-encoded and written by this tab. There are no uploads, accounts, analytics or tracking. The app works offline after the first load; OCR downloads an English model from a CDN the first time you use it, but your PDF never leaves the device.</p>' +
+              '<p class="hint">Files are decoded, re-encoded and written by this tab. There are no uploads, accounts, analytics or tracking. Every tool, including OCR, works fully offline after the first load; the English OCR model is bundled.</p>' +
             '</div>' +
             '<div class="panel"><h2 class="panel-title">quality &amp; limits</h2>' +
               '<p class="hint">Squeezing reduces quality by design; the estimator encodes a real sample so you can see the trade-off before running. Rasterising a PDF flattens its text into images — use “Keep text” when the PDF must stay selectable. Animated GIFs become a single frame. Password tools use AES-256 and require a modern browser.</p>' +
@@ -1228,7 +1228,7 @@
         '</div>' +
         '<div id="' + id + 'Body" hidden>' +
           '<div class="input-row mt-8">' +
-            '<input class="input" type="number" id="' + id + 'KB" min="10" step="10" value="500" aria-label="Target size in kilobytes">' +
+            '<input class="input" type="number" id="' + id + 'KB" min="0" step="10" value="500" placeholder="e.g. 300" aria-label="Target size in kilobytes">' +
             '<span class="unit-btn">KB</span>' +
           '</div>' +
           '<select class="select mt-8" id="' + id + 'Mode" aria-label="Target size behaviour">' +
@@ -1329,12 +1329,18 @@
       var enabled = get('targetEnabled');
       toggle.checked = enabled;
       body.hidden = !enabled;
-      kb.value = String(get('targetKB'));
+      if (document.activeElement !== kb) kb.value = String(get('targetKB'));
       mode.value = get('targetMode');
-      var bytes = C.kbToBytes(get('targetKB'));
+      var targetKB = Number(get('targetKB'));
+      hint.className = 'hint mt-8';
+      if (!(targetKB > 0)) {
+        hint.textContent = 'Enter a target above 0 KB to enable the run.';
+        hint.classList.add('is-error');
+        return;
+      }
       hint.textContent = get('targetMode') === 'exact'
-        ? 'Pads with harmless metadata to land exactly on ' + C.formatBytes(bytes) + '. Quality is maxed under the limit first.'
-        : 'Stays at or under ' + C.formatBytes(bytes) + '; never pads.';
+        ? 'Pads with harmless metadata to land exactly on ' + C.formatBytes(C.kbToBytes(targetKB)) + '. Quality is maxed under the limit first.'
+        : 'Stays at or under ' + C.formatBytes(C.kbToBytes(targetKB)) + '; never pads.';
     }
 
     toggle.addEventListener('change', function () {
@@ -1343,9 +1349,15 @@
       onChange();
     });
     kb.addEventListener('input', function () {
-      set('targetKB', Number(kb.value));
+      var raw = kb.value;
+      var value = raw === '' ? 0 : Number(raw);
+      if (!isFinite(value) || value < 0) value = 0;
+      set('targetKB', value);
       refresh();
       onChange();
+    });
+    kb.addEventListener('blur', function () {
+      refresh();
     });
     mode.addEventListener('change', function () {
       set('targetMode', mode.value);
@@ -1544,6 +1556,7 @@
 
   function canRunImages(files, options, requireSupportedCustom) {
     if (!files.items.length) return false;
+    if (options.targetEnabled && !(Number(options.targetKB) > 0)) return false;
     if (requireSupportedCustom && options.format === 'custom') {
       if (!options.customMime || !E.supportsType(options.customMime)) return false;
     }
@@ -2083,6 +2096,7 @@
         markStale(files);
         refresh();
         estimator.schedule();
+        updateRun();
       }
     );
 
@@ -2200,8 +2214,14 @@
       if (!toggle) return;
       toggle.checked = app.settings.targetEnabled;
       body.hidden = !app.settings.targetEnabled;
-      kb.value = String(app.settings.targetKB);
+      if (document.activeElement !== kb) kb.value = String(app.settings.targetKB);
       mode.value = app.settings.targetMode;
+      hint.className = 'hint mt-8';
+      if (!(Number(app.settings.targetKB) > 0)) {
+        hint.textContent = 'Enter a target above 0 KB to enable the run.';
+        hint.classList.add('is-error');
+        return;
+      }
       hint.textContent = app.settings.targetMode === 'exact'
         ? 'Pads with harmless metadata to land exactly on ' + C.formatBytes(C.kbToBytes(app.settings.targetKB)) + '.'
         : 'Stays at or under ' + C.formatBytes(C.kbToBytes(app.settings.targetKB)) + '.';
@@ -3262,7 +3282,7 @@
           '<select class="select" id="ocrDpi"><option value="150">150 dpi — fast</option><option value="200">200 dpi — balanced</option><option value="300">300 dpi — slow</option></select>' +
         '</div>' +
         '<p class="hint">English text only. Adds an invisible, selectable text layer over each page.</p>' +
-        '<div class="notice">This is the one tool that needs the network: the OCR engine and its ~11 MB English model are downloaded from a CDN the first time. Your PDF still never leaves the device.</div>'
+        '<div class="notice">The OCR engine and English model are bundled. This runs fully offline; your PDF never leaves the device.</div>'
     });
     mountPdfTool(tool, {
       action: 'make searchable',

@@ -392,6 +392,22 @@ async function makeFixtures() {
     await page.screenshot({ path: path.join(SHOTS, '03-crop-result.png'), fullPage: true });
   });
 
+  await check('target field can be cleared, and zero blocks the run', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.selectOption('#preset', 'us-passport');
+    await page.waitForTimeout(300);
+    await page.locator('#targetKB').fill('');
+    await page.waitForTimeout(300);
+    if ((await page.locator('#targetKB').inputValue()) !== '') throw new Error('field was rewritten');
+    if (!(await page.locator('#runBtn').isDisabled())) throw new Error('run enabled at 0 KB');
+    if (!/above 0 KB/.test(await page.locator('#targetHint').innerText())) throw new Error('missing hint');
+    await page.locator('#targetKB').fill('300');
+    await page.waitForTimeout(300);
+    if ((await page.locator('#targetKB').inputValue()) !== '300') throw new Error('cannot type 300');
+    if (await page.locator('#runBtn').isDisabled()) throw new Error('run still disabled at 300 KB');
+  });
+
   await check('exact WebP target is byte-exact and decodes', async () => {
     await fresh('#/crop');
     await upload([path.join(FIXTURES, 'photo.jpg')]);

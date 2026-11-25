@@ -25,7 +25,11 @@ const CORE_ASSETS = [
   './lib/pdf.worker.min.js',
   './lib/pdf-lib.min.js',
   './lib/heic2any.min.js',
-  './lib/jszip.min.js'
+  './lib/jszip.min.js',
+  './lib/ocr/tesseract.min.js',
+  './lib/ocr/worker.min.js',
+  './lib/ocr/core/tesseract-core-simd-lstm.wasm.js',
+  './lib/ocr/lang/eng.traineddata.gz'
 ];
 
 self.addEventListener('install', (event) => {

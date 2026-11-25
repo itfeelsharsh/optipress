@@ -1,6 +1,6 @@
 # Opti
 
-**Live:** https://opti.harshbanker.com · **v2.2**
+**Live:** https://opti.harshbanker.com · **v2.3**
 
 A local-first image and PDF workshop. Nothing is uploaded, nothing is tracked, and every tool runs in the browser tab.
 
@@ -21,7 +21,7 @@ Secure: **add password** (AES-256), **remove password**.
 
 ## Privacy
 
-Files are decoded, re-encoded and written in the tab. There are no uploads, accounts, analytics or tracking. The app works offline after the first load. OCR is the one exception: it downloads an English model (~11 MB) from a CDN the first time, but the PDF still never leaves the device.
+Files are decoded, re-encoded and written in the tab. There are no uploads, accounts, analytics or tracking. Every tool works fully offline after the first load, including OCR — the English model is bundled with the app.
 
 ## Development
 

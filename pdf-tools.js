@@ -514,8 +514,14 @@
         throw normalizeError(err);
       }
 
-      progress(18, 'Loading English OCR model (first run downloads ~11 MB)');
+      progress(18, 'Loading bundled English OCR model');
+      var base = new URL('./lib/ocr/', window.location.href).href;
       var worker = await window.Tesseract.createWorker('eng', 1, {
+        workerPath: base + 'worker.min.js',
+        corePath: base + 'core/tesseract-core-simd-lstm.wasm.js',
+        langPath: base + 'lang',
+        workerBlobURL: false,
+        gzip: true,
         logger: function (message) {
           if (message.status === 'recognizing text') {
             progress(18 + Math.round(message.progress * 60), 'Recognising text');
@@ -580,14 +586,15 @@
 
     async ensureTesseract(onProgress) {
       if (window.Tesseract) return;
-      onProgress(8, 'Downloading OCR engine');
+      onProgress(8, 'Loading offline OCR engine');
+      var url = new URL('./lib/ocr/tesseract.min.js', window.location.href).href;
       await new Promise(function (resolve, reject) {
         var script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js';
+        script.src = url;
         script.async = true;
         script.onload = function () { resolve(); };
         script.onerror = function () {
-          reject(new Error('Could not download the OCR engine. Check your connection and try again.'));
+          reject(new Error('Could not load the bundled OCR engine. Reload and try again.'));
         };
         document.head.appendChild(script);
       });
