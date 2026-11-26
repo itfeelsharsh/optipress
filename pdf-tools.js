@@ -69,6 +69,20 @@
     });
   }
 
+  function checkCancel() {
+    if (window.optiCancelToken && window.optiCancelToken.cancelled) {
+      var error = new Error('Cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+  }
+
+  function range(total) {
+    var pages = [];
+    for (var i = 1; i <= total; i++) pages.push(i);
+    return pages;
+  }
+
   function renderCanvasForPage(page, dpi, maxPixels) {
     var base = page.getViewport({ scale: 1 });
     var scale = dpi / 72;
@@ -146,6 +160,7 @@
       var progress = onProgress || function () {};
       var out = await window.PDFLib.PDFDocument.create();
       for (var i = 0; i < files.length; i++) {
+        checkCancel();
         progress(Math.round((i / files.length) * 80), 'Reading ' + files[i].name);
         var doc = await this.load(files[i]);
         var copied = await out.copyPages(doc, doc.getPageIndices());
@@ -242,6 +257,7 @@
       var progress = onProgress || function () {};
       var results = [];
       for (var i = 0; i < parts.length; i++) {
+        checkCancel();
         ensurePageList(parts[i], doc.getPageCount());
         progress(Math.round((i / parts.length) * 85), 'Building part ' + (i + 1));
         var out = await window.PDFLib.PDFDocument.create();
@@ -337,6 +353,7 @@
 
       try {
         for (var i = 1; i <= pdf.numPages; i++) {
+          checkCancel();
           progress(Math.round(((i - 1) / pdf.numPages) * 90), 'Rendering page ' + i + ' of ' + pdf.numPages);
           var page = await pdf.getPage(i);
           var canvas = await renderCanvasForPage(page, dpi, 24 * 1000 * 1000);
@@ -361,6 +378,301 @@
 
       progress(100, 'Done');
       return results;
+    }
+
+    async renderThumbnails(file, options, onPage) {
+      var opts = options || {};
+      var limit = opts.limit || 120;
+      var bytes = new Uint8Array(await file.arrayBuffer());
+      var pdf = await PdfJs().getDocument({ data: bytes }).promise;
+      try {
+        var total = pdf.numPages;
+        var count = Math.min(total, limit);
+        for (var i = 1; i <= count; i++) {
+          if (opts.cancelled && opts.cancelled()) break;
+          var page = await pdf.getPage(i);
+          var base = page.getViewport({ scale: 1 });
+          var scale = Math.min(2, 150 / Math.max(1, base.width));
+          var viewport = page.getViewport({ scale: scale });
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(viewport.width));
+          canvas.height = Math.max(1, Math.round(viewport.height));
+          var context = canvas.getContext('2d');
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          await page.render({ canvasContext: context, viewport: viewport }).promise;
+          page.cleanup();
+          onPage(i, total, canvas);
+          await yieldToUi();
+        }
+        return total;
+      } finally {
+        try { await pdf.destroy(); } catch (err) { /* noop */ }
+      }
+    }
+
+    async extractText(file, options, onProgress) {
+      var opts = options || {};
+      var progress = onProgress || function () {};
+      var bytes = new Uint8Array(await file.arrayBuffer());
+      var pdf;
+      try {
+        pdf = await PdfJs().getDocument({ data: bytes }).promise;
+      } catch (err) {
+        throw normalizeError(err);
+      }
+      var pages = opts.pages && opts.pages.length ? opts.pages : range(pdf.numPages);
+      var parts = [];
+      try {
+        for (var i = 0; i < pages.length; i++) {
+          checkCancel();
+          var pageNumber = pages[i];
+          progress(Math.round((i / pages.length) * 90), 'Reading page ' + pageNumber);
+          var page = await pdf.getPage(pageNumber);
+          var content = await page.getTextContent();
+          var text = content.items
+            .map(function (item) { return item.str + (item.hasEOL ? '\n' : ' '); })
+            .join('')
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+          parts.push('--- page ' + pageNumber + ' ---\n' + text);
+          page.cleanup();
+          await yieldToUi();
+        }
+      } finally {
+        try { await pdf.destroy(); } catch (err) { /* noop */ }
+      }
+      progress(100, 'Done');
+      var base = Core().baseName(file.name);
+      return {
+        blob: new Blob([parts.join('\n\n') + '\n'], { type: 'text/plain' }),
+        fileName: base + '-text.txt',
+        pages: pages.length,
+        note: 'Digital text only. Run OCR first when the PDF is a scan.'
+      };
+    }
+
+    async cleanMetadata(file, options, onProgress) {
+      var progress = onProgress || function () {};
+      var doc = await this.load(file);
+      var Lib = window.PDFLib;
+      var PDFName = Lib.PDFName;
+      var removed = [];
+      var info = doc.getInfoDict();
+      ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer', 'CreationDate', 'ModDate'].forEach(function (key) {
+        var name = PDFName.of(key);
+        if (info.get(name)) {
+          info.delete(name);
+          removed.push(key);
+        }
+      });
+      try {
+        if (doc.catalog.get(PDFName.of('Metadata'))) {
+          doc.catalog.delete(PDFName.of('Metadata'));
+          removed.push('XMP');
+        }
+      } catch (err) {
+        /* XMP is optional */
+      }
+      checkCancel();
+      progress(70, 'Writing clean PDF');
+      var bytes = await doc.save({ useObjectStreams: true, updateMetadata: false });
+      progress(100, 'Clean');
+      return {
+        blob: new Blob([bytes], { type: 'application/pdf' }),
+        fileName: downloadName(file.name, 'clean'),
+        pages: doc.getPageCount(),
+        note: removed.length ? 'Removed: ' + removed.join(', ') + '.' : 'No document metadata found.',
+        removed: removed
+      };
+    }
+
+    async stampImage(file, imageFile, options, onProgress) {
+      var opts = options || {};
+      var progress = onProgress || function () {};
+      var doc = await this.load(file);
+      var prepared = await Engine().prepareForPdf(imageFile);
+      var imageBytes = new Uint8Array(await prepared.blob.arrayBuffer());
+      var image = prepared.mimeType === 'image/png'
+        ? await doc.embedPng(imageBytes)
+        : await doc.embedJpg(imageBytes);
+      var pages = doc.getPages();
+      var selected = opts.pages && opts.pages.length ? opts.pages : pages.map(function (_, index) { return index + 1; });
+      var scalePct = Core().clampNumber(opts.scale === undefined ? 20 : opts.scale, 2, 90);
+      var opacity = Core().clampNumber(opts.opacity === undefined ? 100 : opts.opacity, 5, 100) / 100;
+      var margin = Math.max(0, Number(opts.margin) || 24);
+
+      selected.forEach(function (pageNumber, index) {
+        checkCancel();
+        progress(35 + Math.round((index / selected.length) * 45), 'Stamping page ' + pageNumber);
+        var page = pages[pageNumber - 1];
+        if (!page) return;
+        var pageWidth = page.getWidth();
+        var pageHeight = page.getHeight();
+        var drawWidth = pageWidth * (scalePct / 100);
+        var drawHeight = drawWidth * (prepared.height / prepared.width);
+        var maxHeight = pageHeight * 0.32;
+        if (drawHeight > maxHeight) {
+          drawHeight = maxHeight;
+          drawWidth = drawHeight * (prepared.width / prepared.height);
+        }
+        var x = pageWidth - drawWidth - margin;
+        var y = margin;
+        if (opts.position === 'bottom-left') { x = margin; y = margin; }
+        else if (opts.position === 'top-left') { x = margin; y = pageHeight - drawHeight - margin; }
+        else if (opts.position === 'top-right') { x = pageWidth - drawWidth - margin; y = pageHeight - drawHeight - margin; }
+        else if (opts.position === 'center') { x = (pageWidth - drawWidth) / 2; y = (pageHeight - drawHeight) / 2; }
+        page.drawImage(image, { x: x, y: y, width: drawWidth, height: drawHeight, opacity: opacity });
+      });
+
+      progress(86, 'Writing PDF');
+      var bytes = await this.save(doc);
+      progress(100, 'Stamped');
+      return {
+        blob: this.blobFrom(bytes),
+        fileName: downloadName(file.name, 'signed'),
+        pages: selected.length,
+        note: 'Visual signature only — this is not a cryptographic signature.'
+      };
+    }
+
+    async resizePages(file, options, onProgress) {
+      var opts = options || {};
+      var progress = onProgress || function () {};
+      var source = await this.load(file);
+      var out = await window.PDFLib.PDFDocument.create();
+      var presets = {
+        a4: [595.28, 841.89],
+        letter: [612, 792]
+      };
+      var margin = Math.max(0, Number(opts.margin) || 0);
+      var trim = Math.max(0, Number(opts.trim) || 0);
+      var pages = source.getPages();
+
+      for (var i = 0; i < pages.length; i++) {
+        checkCancel();
+        progress(20 + Math.round((i / pages.length) * 60), 'Rebuilding page ' + (i + 1));
+        var page = pages[i];
+        var srcW = page.getWidth();
+        var srcH = page.getHeight();
+        var effW = Math.max(1, srcW - trim * 2);
+        var effH = Math.max(1, srcH - trim * 2);
+        var pageSize = opts.pageSize || 'a4';
+        var targetW;
+        var targetH;
+        if (pageSize === 'original') {
+          targetW = effW;
+          targetH = effH;
+        } else {
+          var pair = presets[pageSize] || presets.a4;
+          var landscape = opts.orientation === 'landscape' || (opts.orientation !== 'portrait' && effW > effH);
+          targetW = landscape ? pair[1] : pair[0];
+          targetH = landscape ? pair[0] : pair[1];
+        }
+        var boxW = Math.max(1, targetW - margin * 2);
+        var boxH = Math.max(1, targetH - margin * 2);
+        var scale = Math.min(boxW / effW, boxH / effH);
+        var drawW = effW * scale;
+        var drawH = effH * scale;
+        var x = margin + (boxW - drawW) / 2 - trim * scale;
+        var y = margin + (boxH - drawH) / 2 - trim * scale;
+        var embedded = await out.embedPage(page);
+        var newPage = out.addPage([targetW, targetH]);
+        newPage.drawPage(embedded, {
+          x: x,
+          y: y,
+          xScale: scale,
+          yScale: scale
+        });
+        await yieldToUi();
+      }
+
+      checkCancel();
+      progress(88, 'Writing PDF');
+      var bytes = await out.save({ useObjectStreams: true, updateMetadata: false });
+      progress(100, 'Resized');
+      return {
+        blob: this.blobFrom(bytes),
+        fileName: downloadName(file.name, pageSize === 'original' && trim > 0 ? 'trimmed' : 'resized'),
+        pages: out.getPageCount(),
+        note: trim > 0 ? 'Margins are hidden by the page box, not deleted from the file.' : 'Page size rebuilt; text stays selectable.'
+      };
+    }
+
+    async inspectForm(file) {
+      var doc = await this.load(file);
+      var form = doc.getForm();
+      var Lib = window.PDFLib;
+      var fields = form.getFields().map(function (field) {
+        var entry = { name: field.getName(), type: 'other', value: '' };
+        if (field instanceof Lib.PDFTextField) {
+          entry.type = 'text';
+          entry.value = field.getText() || '';
+        } else if (field instanceof Lib.PDFCheckBox) {
+          entry.type = 'checkbox';
+          entry.value = field.isChecked();
+        } else if (field instanceof Lib.PDFRadioGroup) {
+          entry.type = 'radio';
+          entry.value = field.getSelected() || '';
+          entry.options = field.getOptions();
+        } else if (field instanceof Lib.PDFDropdown || field instanceof Lib.PDFOptionList) {
+          entry.type = 'choice';
+          var selected = field.getSelected();
+          entry.value = selected && selected.length ? selected[0] : '';
+          entry.options = field.getOptions();
+        }
+        return entry;
+      });
+      return { fields: fields };
+    }
+
+    async fillForm(file, values, options, onProgress) {
+      var opts = options || {};
+      var progress = onProgress || function () {};
+      var doc = await this.load(file);
+      var form = doc.getForm();
+      var Lib = window.PDFLib;
+      var fields = form.getFields();
+      var applied = 0;
+
+      fields.forEach(function (field) {
+        checkCancel();
+        var name = field.getName();
+        if (!Object.prototype.hasOwnProperty.call(values, name)) return;
+        var value = values[name];
+        if (field instanceof Lib.PDFTextField) {
+          field.setText(value === undefined || value === null ? '' : String(value));
+          applied++;
+        } else if (field instanceof Lib.PDFCheckBox) {
+          if (value) field.check(); else field.uncheck();
+          applied++;
+        } else if (field instanceof Lib.PDFRadioGroup) {
+          if (value) { field.select(String(value)); applied++; }
+        } else if (field instanceof Lib.PDFDropdown || field instanceof Lib.PDFOptionList) {
+          if (value) { field.select(String(value)); applied++; }
+        }
+      });
+
+      progress(60, 'Writing filled PDF');
+      var flattened = false;
+      if (opts.flatten) {
+        try {
+          form.flatten();
+          flattened = true;
+        } catch (err) {
+          /* some forms cannot flatten; keep them editable */
+        }
+      }
+      checkCancel();
+      var bytes = await doc.save({ useObjectStreams: true, updateMetadata: false });
+      progress(100, 'Filled');
+      return {
+        blob: this.blobFrom(bytes),
+        fileName: downloadName(file.name, 'filled'),
+        pages: doc.getPageCount(),
+        note: applied + ' field' + (applied === 1 ? '' : 's') + ' filled' + (flattened ? ' and flattened.' : '.')
+      };
     }
 
     async watermark(file, options, onProgress) {
@@ -507,6 +819,7 @@
       var doc = await this.load(file);
       var ocrFont = await doc.embedFont(window.PDFLib.StandardFonts.Helvetica);
       var dpi = Number(opts.dpi) || 200;
+      var scanMode = opts.scanMode || 'off';
       var pdf;
       try {
         pdf = await PdfJs().getDocument({ data: sourceBytes.slice(0) }).promise;
@@ -531,13 +844,18 @@
 
       try {
         var pages = doc.getPages();
-        for (var i = 1; i <= pdf.numPages; i++) {
-          progress(18 + Math.round(((i - 1) / pdf.numPages) * 60), 'Scanning page ' + i + ' of ' + pdf.numPages);
-          var page = await pdf.getPage(i);
+        var targetPages = opts.pages && opts.pages.length ? opts.pages : range(pdf.numPages);
+        for (var i = 0; i < targetPages.length; i++) {
+          checkCancel();
+          var pageNumber = targetPages[i];
+          progress(18 + Math.round((i / targetPages.length) * 60), 'Scanning page ' + pageNumber + ' of ' + pdf.numPages);
+          var page = await pdf.getPage(pageNumber);
           var canvas = await renderCanvasForPage(page, dpi, 16 * 1000 * 1000);
+          if (scanMode !== 'off') Engine().applyScanCleanup(canvas, scanMode);
           var result = await worker.recognize(canvas);
+          checkCancel();
           var words = collectWords(result && result.data);
-          var pdfPage = pages[i - 1];
+          var pdfPage = pages[pageNumber - 1];
           if (pdfPage) {
             var scaleX = pdfPage.getWidth() / canvas.width;
             var scaleY = pdfPage.getHeight() / canvas.height;
@@ -580,7 +898,8 @@
       return {
         blob: this.blobFrom(bytes),
         fileName: downloadName(file.name, 'searchable'),
-        pages: doc.getPageCount()
+        pages: doc.getPageCount(),
+        note: 'OCR applied to ' + targetPages.length + ' page' + (targetPages.length === 1 ? '' : 's') + '.'
       };
     }
 

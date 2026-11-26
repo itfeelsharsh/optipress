@@ -238,7 +238,7 @@ async function makeFixtures() {
   await check('home renders the tool catalogue without errors', async () => {
     await fresh('#/');
     const cards = await page.locator('.tool-card').count();
-    if (cards !== 17) throw new Error('tool cards: ' + cards);
+    if (cards !== 22) throw new Error('tool cards: ' + cards);
     const title = await page.title();
     if (!title.startsWith('Opti')) throw new Error('title: ' + title);
     const hero = await page.locator('.hero-title').innerText();
@@ -679,6 +679,98 @@ async function makeFixtures() {
     await run(300000);
     const info = await pdfInfo(fs.readFileSync(await downloadResult()));
     if (!info.ok) throw new Error(info.error);
+  });
+
+  await check('PDF to text extracts the text layer', async () => {
+    await fresh('#/pdf-to-text');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run();
+    const saved = await downloadResult();
+    if (!saved.toLowerCase().endsWith('.txt')) throw new Error('output: ' + saved);
+    const text = fs.readFileSync(saved, 'utf8');
+    if (!/page 1/i.test(text) || !/Selectable text/.test(text)) throw new Error('text missing: ' + text.slice(0, 80));
+  });
+
+  await check('clean metadata removes document info', async () => {
+    await fresh('#/clean-metadata');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await run();
+    const note = await page.locator('#resultZone .result-meta').last().textContent();
+    if (!/Removed:|No document metadata/i.test(note)) throw new Error('note: ' + note);
+  });
+
+  await check('page size rebuilds pages with margins', async () => {
+    await fresh('#/resize-pdf');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.selectOption('#pdfPageSize', 'letter');
+    await page.fill('#pdfMargin', '8');
+    await run();
+    const info = await pdfInfo(fs.readFileSync(await downloadResult()));
+    if (!info.ok) throw new Error(info.error);
+  });
+
+  await check('sign & stamp adds an image to the last page', async () => {
+    await fresh('#/sign-pdf');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.setInputFiles('#sigFile', path.join(FIXTURES, 'alpha.png'));
+    await page.waitForTimeout(400);
+    await run();
+    const name = await page.locator('#resultZone .result-name').textContent();
+    if (!/signed/.test(name)) throw new Error('name: ' + name);
+  });
+
+  await check('PDF target size lands under the cap', async () => {
+    await fresh('#/compress-pdf');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.selectOption('#pdfMode', 'raster');
+    await page.check('#pdfTargetToggle');
+    await page.fill('#pdfTargetMB', '0.4');
+    await page.waitForTimeout(400);
+    await run(300000);
+    const note = await page.locator('#resultZone .result-meta').last().textContent();
+    if (!/Fit under 41\d KB|Fit under 0\.4 MB|Could not get under/i.test(note)) throw new Error('note: ' + note);
+    const saved = await downloadResult();
+    if (fs.statSync(saved).size > 0.4 * 1024 * 1024) throw new Error('over target: ' + fs.statSync(saved).size);
+  });
+
+  await check('scan cleanup and freeform crop produce a sized image', async () => {
+    await fresh('#/crop');
+    await upload([path.join(FIXTURES, 'photo.jpg')]);
+    await page.check('#freeCrop');
+    await page.waitForTimeout(400);
+    const box = await page.locator('#previewCanvas').boundingBox();
+    await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.75, { steps: 8 });
+    await page.mouse.up();
+    await page.selectOption('#scan', 'bw');
+    await page.waitForTimeout(400);
+    const note = await page.locator('#freeCropHint').textContent();
+    if (!/Selection \d+×\d+/.test(note)) throw new Error('freeform: ' + note);
+    await run();
+    const name = await page.locator('#resultZone .result-name').textContent();
+    if (!/cropped-\d+x\d+/.test(name)) throw new Error('name: ' + name);
+  });
+
+  await check('page thumbnails toggle the extract range', async () => {
+    await fresh('#/extract');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.waitForSelector('#pageThumbs .thumb', { timeout: 30000 });
+    const count = await page.locator('#pageThumbs .thumb').count();
+    if (count !== 3) throw new Error('thumbnails: ' + count);
+    await page.locator('#pageThumbs .thumb').nth(1).click();
+    await page.waitForTimeout(250);
+    const value = await page.inputValue('#pages');
+    if (value !== '1, 3') throw new Error('range: ' + value);
+  });
+
+  await check('OCR page range processes only the chosen page', async () => {
+    await fresh('#/ocr');
+    await upload([path.join(FIXTURES, 'report.pdf')]);
+    await page.fill('#ocrPages', '2');
+    await run(300000);
+    const note = await page.locator('#resultZone .result-meta').last().textContent();
+    if (!/OCR applied to 1 page/i.test(note)) throw new Error('note: ' + note);
   });
 
   // ------------------------------------------------------------- app-level --

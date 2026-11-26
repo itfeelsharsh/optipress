@@ -59,6 +59,7 @@ for (const file of cssFiles) {
 }
 
 for (const file of [
+  'lib/utif.js',
   'lib/ocr/tesseract.min.js',
   'lib/ocr/worker.min.js',
   'lib/ocr/core/tesseract-core-simd-lstm.wasm.js',

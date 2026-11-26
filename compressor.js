@@ -5,6 +5,26 @@
 (function () {
   'use strict';
 
+  function isCancelled() {
+    return !!(window.optiCancelToken && window.optiCancelToken.cancelled);
+  }
+
+  function abortError() {
+    var error = new Error('Cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function ensureActive() {
+    if (isCancelled()) throw abortError();
+  }
+
+  function isTiffSource(source) {
+    var name = source && source.name ? String(source.name) : '';
+    var type = source && source.type ? String(source.type) : '';
+    return /\.tiff?$/i.test(name) || type === 'image/tiff';
+  }
+
   function Core() {
     return window.OptiCore;
   }
@@ -98,7 +118,8 @@
           sample: sample.bitmap,
           sampleWidth: sample.width,
           sampleHeight: sample.height,
-          mimeType: file.type || 'image/jpeg'
+          mimeType: file.type || 'image/jpeg',
+          tiffPages: drawable.pages || 1
         };
       } finally {
         drawable.close();
@@ -252,6 +273,7 @@
       var pagePixels = 612 * 792 * Math.pow(dpi / 72, 2);
       var estimate = pages * pagePixels * bytesPerPixel;
       estimate = Math.max(pages * 9000, Math.min(estimate, file.size));
+      if (options.pdfTargetBytes) estimate = Math.min(estimate, Number(options.pdfTargetBytes));
       return Math.round(estimate);
     }
 
@@ -260,6 +282,7 @@
     // ------------------------------------------------------------------
 
     async compress(file, options, onProgress, meta) {
+      ensureActive();
       var info = meta || {};
       var kind = info.kind || Core().kindOf(file);
       var progress = typeof onProgress === 'function' ? onProgress : function () {};
@@ -274,6 +297,7 @@
     }
 
     async compressHeic(file, options, onProgress, meta) {
+      ensureActive();
       onProgress(6, 'Converting HEIC');
       var prepared = meta && meta.prepared ? meta.prepared : null;
       if (!prepared) prepared = await this.convertHeic(file);
@@ -288,6 +312,7 @@
     }
 
     async compressImage(file, options, onProgress, meta) {
+      ensureActive();
       var C = Core();
       var caps = this.capabilities();
       var originalName = (meta && meta.originalName) || file.name;
@@ -298,8 +323,12 @@
       var canvas = null;
 
       try {
+        ensureActive();
         var srcW = drawable.width;
         var srcH = drawable.height;
+        if ((meta && meta.tiffPages > 1) || drawable.pages > 1) {
+          notes.push('Multi-page TIFF: only the first page was processed.');
+        }
         var hasAlpha = await this.detectAlpha(drawable.source);
 
         var requested = C.computeTargetDims(srcW, srcH, options);
@@ -326,6 +355,27 @@
           ? (background === 'black' ? '#000000' : '#ffffff')
           : (background === 'transparent' ? null : background === 'black' ? '#000000' : '#ffffff');
 
+        ensureActive();
+        if (options.cropRect) {
+          var region = C.normalizeCropRect(options.cropRect);
+          if (region) {
+            var cropX = Math.max(0, Math.round(region.x * srcW));
+            var cropY = Math.max(0, Math.round(region.y * srcH));
+            var cropW = Math.max(1, Math.min(srcW - cropX, Math.round(region.w * srcW)));
+            var cropH = Math.max(1, Math.min(srcH - cropY, Math.round(region.h * srcH)));
+            var regionCanvas = document.createElement('canvas');
+            regionCanvas.width = cropW;
+            regionCanvas.height = cropH;
+            var regionCtx = regionCanvas.getContext('2d');
+            regionCtx.imageSmoothingEnabled = true;
+            regionCtx.imageSmoothingQuality = 'high';
+            regionCtx.drawImage(drawable.source, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+            drawable.source = regionCanvas;
+            srcW = cropW;
+            srcH = cropH;
+            notes.push('Cropped a freeform area of ' + cropW + '×' + cropH + ' px from the original.');
+          }
+        }
         onProgress(16, 'Rendering pixels');
         var geom = C.computeCropRect(srcW, srcH, dims.width, dims.height, options.fitMode, options.anchor);
         canvas = this.renderCanvas(drawable.source, srcW, srcH, dims.width, dims.height, {
@@ -333,6 +383,10 @@
           anchor: options.anchor,
           background: matte
         });
+        if (options.scanMode && options.scanMode !== 'off') {
+          canvas = this.applyScanCleanup(canvas, options.scanMode);
+          notes.push('Scan cleanup: ' + options.scanMode + '.');
+        }
 
         if (options.fitMode === 'fill' && !C.ratiosClose(srcW, srcH, dims.width, dims.height, 0.005)) {
           notes.push('Cropped to fill ' + dims.width + '×' + dims.height + ' (' + (options.anchor || 'center') + ').');
@@ -345,6 +399,7 @@
         if (file.type === 'image/gif') notes.push('Animated GIFs are flattened to a single frame.');
         if (file.type === 'image/svg+xml') notes.push('SVG artwork is rasterised to pixels.');
 
+        ensureActive();
         onProgress(40, 'Encoding');
         var quality = C.clampNumber(options.quality, 5, 100) / 100;
         var blob;
@@ -377,6 +432,7 @@
           }
         }
 
+        ensureActive();
         var paddedBytes = 0;
         if (targetBytes && options.targetMode === 'exact' && !targetMissed && blob.size < targetBytes) {
           var original = new Uint8Array(await blob.arrayBuffer());
@@ -440,6 +496,7 @@
       var best = null;
 
       for (var round = 0; round < 4; round++) {
+        ensureActive();
         var search = await this.searchQuality(work, mime, targetBytes, cap, round === 0 ? 7 : 4, onProgress, round);
         if (search.ok) {
           return {
@@ -494,6 +551,7 @@
       var smallest = null;
 
       for (var i = 0; i < iterations; i++) {
+        ensureActive();
         var quality = (lo + hi) / 2;
         var blob = await this.canvasToBlob(canvas, mime, quality);
         if (!smallest || blob.size < smallest.size) {
@@ -524,6 +582,7 @@
     // ------------------------------------------------------------------
 
     async compressPdf(file, options, onProgress) {
+      ensureActive();
       var C = Core();
       this.ensurePdfLibraries();
       if (typeof location !== 'undefined' && location.protocol === 'file:') {
@@ -540,6 +599,7 @@
     }
 
     async compressPdfStructure(file, bytes, onProgress) {
+      ensureActive();
       var C = Core();
       onProgress(25, 'Rebuilding document');
       var doc;
@@ -549,6 +609,7 @@
         throw normalizeError(err);
       }
       onProgress(70, 'Writing compressed PDF');
+      ensureActive();
       var out = await doc.save({ useObjectStreams: true, addDefaultPage: false });
 
       if (out.byteLength >= file.size) {
@@ -575,8 +636,10 @@
       var C = Core();
       var pdf = await this.openPdf(bytes);
       var pages = pdf.numPages;
-      var targetDpi = options.pdfDpi || 150;
-      var quality = C.clampNumber(options.quality, 5, 100) / 100;
+      var baseDpi = Number(options.pdfDpi) || 150;
+      var baseQuality = C.clampNumber(options.quality, 5, 100) / 100;
+      var targetBytes = Number(options.pdfTargetBytes) || 0;
+      var scanMode = options.scanMode || 'off';
       var notes = [];
 
       if (pages > 150) {
@@ -588,72 +651,83 @@
         throw new Error('This PDF has ' + pages + ' pages. Split it, or switch the PDF engine to “Keep text” and retry.');
       }
 
-      var newPdf = await window.PDFLib.PDFDocument.create();
+      var attempts = targetBytes
+        ? [
+            { dpi: baseDpi, quality: baseQuality },
+            { dpi: baseDpi, quality: Math.max(0.2, baseQuality * 0.72) },
+            { dpi: Math.max(72, Math.round(baseDpi * 0.82)), quality: Math.max(0.18, baseQuality * 0.55) },
+            { dpi: Math.max(72, Math.round(baseDpi * 0.66)), quality: Math.max(0.15, baseQuality * 0.4) },
+            { dpi: 72, quality: 0.3 }
+          ]
+        : [{ dpi: baseDpi, quality: baseQuality }];
+
+      var best = null;
+      var bestAttempt = null;
 
       try {
-        for (var i = 1; i <= pages; i++) {
-          onProgress(8 + Math.round((i / pages) * 78), 'Rendering page ' + i + ' of ' + pages);
-          var page = await pdf.getPage(i);
-          try {
-            var base = page.getViewport({ scale: 1 });
-            var scale = targetDpi / 72;
-            var desiredW = base.width * scale;
-            var desiredH = base.height * scale;
-            var capped = C.capCanvasDims(desiredW, desiredH, 24 * 1000 * 1000, 10000);
-            var viewport = page.getViewport({ scale: scale * (capped.width / desiredW) });
+        for (var attemptIndex = 0; attemptIndex < attempts.length; attemptIndex++) {
+          ensureActive();
+          var attempt = attempts[attemptIndex];
+          var newPdf = await window.PDFLib.PDFDocument.create();
 
-            var canvas = document.createElement('canvas');
-            canvas.width = Math.max(1, Math.round(viewport.width));
-            canvas.height = Math.max(1, Math.round(viewport.height));
-            var ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+          for (var i = 1; i <= pages; i++) {
+            ensureActive();
+            var slice = 76 / attempts.length;
+            var percent = 8 + attemptIndex * slice + ((i - 1) / pages) * slice;
+            onProgress(
+              Math.round(percent),
+              'Rendering page ' + i + ' of ' + pages + (attempts.length > 1 ? ' · pass ' + (attemptIndex + 1) : '')
+            );
+            var page = await pdf.getPage(i);
+            try {
+              var base = page.getViewport({ scale: 1 });
+              var scale = attempt.dpi / 72;
+              var desiredW = base.width * scale;
+              var desiredH = base.height * scale;
+              var capped = C.capCanvasDims(desiredW, desiredH, 24 * 1000 * 1000, 10000);
+              var viewport = page.getViewport({ scale: scale * (capped.width / desiredW) });
 
-            var jpeg = await this.canvasToBlob(canvas, 'image/jpeg', quality);
-            var jpegBytes = new Uint8Array(await jpeg.arrayBuffer());
-            var image = await newPdf.embedJpg(jpegBytes);
-            var outPage = newPdf.addPage([base.width, base.height]);
-            outPage.drawImage(image, { x: 0, y: 0, width: base.width, height: base.height });
+              var canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(viewport.width));
+              canvas.height = Math.max(1, Math.round(viewport.height));
+              var ctx = canvas.getContext('2d');
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              await page.render({ canvasContext: ctx, viewport: viewport }).promise;
 
-            canvas.width = 0;
-            canvas.height = 0;
-            page.cleanup();
-          } catch (err) {
-            page.cleanup();
-            throw err;
+              if (scanMode !== 'off') this.applyScanCleanup(canvas, scanMode);
+
+              var jpeg = await this.canvasToBlob(canvas, 'image/jpeg', attempt.quality);
+              var jpegBytes = new Uint8Array(await jpeg.arrayBuffer());
+              var image = await newPdf.embedJpg(jpegBytes);
+              var outPage = newPdf.addPage([base.width, base.height]);
+              outPage.drawImage(image, { x: 0, y: 0, width: base.width, height: base.height });
+
+              canvas.width = 0;
+              canvas.height = 0;
+              page.cleanup();
+            } catch (err) {
+              page.cleanup();
+              throw err;
+            }
+            await new Promise(function (resolve) {
+              setTimeout(resolve, 0);
+            });
           }
-          // Yield to the UI so long documents never look frozen.
-          await new Promise(function (resolve) {
-            setTimeout(resolve, 0);
-          });
+
+          ensureActive();
+          onProgress(86, 'Writing PDF');
+          var pdfBytes = await newPdf.save({ useObjectStreams: true });
+          var blob = new Blob([pdfBytes], { type: 'application/pdf' });
+          if (!best || blob.size < best.blob.size) {
+            best = { blob: blob, dpi: attempt.dpi, quality: attempt.quality };
+            bestAttempt = attemptIndex;
+          }
+          if (!targetBytes || blob.size <= targetBytes) break;
+          if (attemptIndex < attempts.length - 1) {
+            onProgress(88, 'Still over target — trying a smaller pass');
+          }
         }
-
-        onProgress(92, 'Writing PDF');
-        var pdfBytes = await newPdf.save({ useObjectStreams: true });
-        var blob = new Blob([pdfBytes], { type: 'application/pdf' });
-
-        if (blob.size >= file.size) {
-          notes.push('Rasterizing made the file larger, so the original was kept.');
-          onProgress(100, 'Already optimal');
-          return {
-            blob: file,
-            fileName: C.outputFileName(file.name, 'application/pdf'),
-            mimeType: 'application/pdf',
-            usedOriginal: true,
-            note: notes.join(' ')
-          };
-        }
-
-        notes.push('Pages are flattened images — text is no longer selectable.');
-        onProgress(100, 'Squeezed');
-        return {
-          blob: blob,
-          fileName: C.outputFileName(file.name, 'application/pdf'),
-          mimeType: 'application/pdf',
-          usedOriginal: false,
-          note: notes.join(' ')
-        };
       } finally {
         try {
           await pdf.destroy();
@@ -661,6 +735,49 @@
           /* noop */
         }
       }
+
+      if (!best) throw new Error('Could not rebuild this PDF.');
+
+      if (targetBytes && file.size <= targetBytes && file.size <= best.blob.size) {
+        onProgress(100, 'Already under target');
+        return {
+          blob: file,
+          fileName: C.outputFileName(file.name, 'application/pdf'),
+          mimeType: 'application/pdf',
+          usedOriginal: true,
+          note: 'Already under ' + C.formatBytes(targetBytes) + ' — original kept.'
+        };
+      }
+
+      if (!targetBytes && best.blob.size >= file.size) {
+        onProgress(100, 'Already optimal');
+        return {
+          blob: file,
+          fileName: C.outputFileName(file.name, 'application/pdf'),
+          mimeType: 'application/pdf',
+          usedOriginal: true,
+          note: 'Rasterizing made the file larger, so the original was kept.'
+        };
+      }
+
+      if (targetBytes) {
+        if (best.blob.size <= targetBytes) {
+          notes.push('Fit under ' + C.formatBytes(targetBytes) + '.');
+        } else {
+          notes.push('Could not get under ' + C.formatBytes(targetBytes) + ' — closest was ' + C.formatBytes(best.blob.size) + '.');
+        }
+      }
+      if (scanMode !== 'off') notes.push('Scan cleanup: ' + scanMode + '.');
+      notes.push('Pages are flattened images — text is no longer selectable.');
+      onProgress(100, targetBytes && best.blob.size <= targetBytes ? 'Under target' : 'Squeezed');
+      return {
+        blob: best.blob,
+        fileName: C.outputFileName(file.name, 'application/pdf'),
+        mimeType: 'application/pdf',
+        usedOriginal: false,
+        targetMissed: !!(targetBytes && best.blob.size > targetBytes),
+        note: notes.join(' ')
+      };
     }
 
     openPdf(data) {
@@ -686,6 +803,8 @@
     // ------------------------------------------------------------------
 
     loadDrawable(source) {
+      var self = this;
+      var tiff = isTiffSource(source);
       if (typeof createImageBitmap === 'function') {
         return createImageBitmap(source).then(
           function (bitmap) {
@@ -699,11 +818,103 @@
             };
           },
           function () {
+            if (tiff) return self.loadTiffDrawable(source);
             return loadViaImageElement(source);
           }
         );
       }
+      if (tiff) return this.loadTiffDrawable(source);
       return loadViaImageElement(source);
+    }
+
+    loadTiffDrawable(source) {
+      return source.arrayBuffer().then(function (buffer) {
+        if (!window.UTIF) throw new Error('TIFF support did not load. Reload the page and try again.');
+        var ifds = window.UTIF.decode(buffer);
+        if (!ifds.length) throw new Error('This TIFF contains no readable image.');
+        var first = ifds[0];
+        window.UTIF.decodeImage(buffer, first);
+        var rgba = window.UTIF.toRGBA8(first);
+        var canvas = document.createElement('canvas');
+        canvas.width = first.width;
+        canvas.height = first.height;
+        var ctx = canvas.getContext('2d');
+        var imageData = ctx.createImageData(first.width, first.height);
+        imageData.data.set(rgba);
+        ctx.putImageData(imageData, 0, 0);
+        return {
+          source: canvas,
+          width: first.width,
+          height: first.height,
+          pages: ifds.length,
+          close: function () {
+            canvas.width = 0;
+            canvas.height = 0;
+          }
+        };
+      });
+    }
+
+    applyScanCleanup(canvas, mode) {
+      if (!mode || mode === 'off' || !canvas) return canvas;
+      var ctx = canvas.getContext('2d', { willReadFrequently: true });
+      var width = canvas.width;
+      var height = canvas.height;
+      if (!width || !height) return canvas;
+      var image = ctx.getImageData(0, 0, width, height);
+      var data = image.data;
+      var total = width * height;
+      var luma = new Uint8ClampedArray(total);
+      var histogram = new Uint32Array(256);
+      var i;
+      var p;
+      for (i = 0, p = 0; i < data.length; i += 4, p++) {
+        var value = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+        luma[p] = value;
+        histogram[value | 0]++;
+      }
+      if (mode === 'bw') {
+        for (i = 0, p = 0; i < data.length; i += 4, p++) {
+          var bw = luma[p] > 150 ? 255 : 0;
+          data[i] = data[i + 1] = data[i + 2] = bw;
+        }
+      } else if (mode === 'contrast') {
+        var lo = 0;
+        var hi = 255;
+        var acc = 0;
+        var threshold = total * 0.02;
+        for (i = 0; i < 256; i++) {
+          acc += histogram[i];
+          if (acc > threshold) {
+            lo = i;
+            break;
+          }
+        }
+        acc = 0;
+        for (i = 255; i >= 0; i--) {
+          acc += histogram[i];
+          if (acc > threshold) {
+            hi = i;
+            break;
+          }
+        }
+        if (hi <= lo) {
+          lo = 0;
+          hi = 255;
+        }
+        var span = hi - lo || 1;
+        for (i = 0, p = 0; i < data.length; i += 4, p++) {
+          var stretched = ((luma[p] - lo) / span) * 255;
+          stretched = stretched < 0 ? 0 : stretched > 255 ? 255 : stretched;
+          data[i] = data[i + 1] = data[i + 2] = stretched;
+        }
+      } else {
+        for (i = 0, p = 0; i < data.length; i += 4, p++) {
+          data[i] = data[i + 1] = data[i + 2] = luma[p];
+        }
+      }
+      ctx.putImageData(image, 0, 0);
+      return canvas;
     }
 
     renderCanvas(source, srcW, srcH, dstW, dstH, options) {
@@ -878,6 +1089,7 @@
     }
 
     async prepareForPdf(file, options) {
+      ensureActive();
       var C = Core();
       var opts = options || {};
       var drawable = await this.loadDrawable(file);

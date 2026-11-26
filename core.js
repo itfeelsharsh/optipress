@@ -255,6 +255,34 @@
     };
   }
 
+  function formatPageSpec(pages) {
+    var sorted = Array.from(new Set((pages || []).map(Number).filter(function (n) { return n > 0; })))
+      .sort(function (a, b) { return a - b; });
+    var parts = [];
+    var i = 0;
+    while (i < sorted.length) {
+      var start = sorted[i];
+      var end = start;
+      while (i + 1 < sorted.length && sorted[i + 1] === end + 1) {
+        i++;
+        end = sorted[i];
+      }
+      parts.push(start === end ? String(start) : start + '-' + end);
+      i++;
+    }
+    return parts.join(', ');
+  }
+
+  function normalizeCropRect(rect) {
+    if (!rect || typeof rect !== 'object') return null;
+    var w = clampNumber(rect.w, 0, 1);
+    var h = clampNumber(rect.h, 0, 1);
+    if (w <= 0.001 || h <= 0.001) return null;
+    var x = clampNumber(rect.x, 0, 1 - w);
+    var y = clampNumber(rect.y, 0, 1 - h);
+    return { x: x, y: y, w: w, h: h };
+  }
+
   function ratiosClose(aWidth, aHeight, bWidth, bHeight, tolerance) {
     var ar = (Number(aWidth) || 1) / (Number(aHeight) || 1);
     var br = (Number(bWidth) || 1) / (Number(bHeight) || 1);
@@ -558,6 +586,8 @@
     computeCropRect: computeCropRect,
     anchorPoint: anchorPoint,
     ratiosClose: ratiosClose,
+    normalizeCropRect: normalizeCropRect,
+    formatPageSpec: formatPageSpec,
     parsePageSpec: parsePageSpec,
     parseSplitSpec: parseSplitSpec,
     mimeExtension: mimeExtension,

@@ -26,6 +26,7 @@ const CORE_ASSETS = [
   './lib/pdf-lib.min.js',
   './lib/heic2any.min.js',
   './lib/jszip.min.js',
+  './lib/utif.js',
   './lib/ocr/tesseract.min.js',
   './lib/ocr/worker.min.js',
   './lib/ocr/core/tesseract-core-simd-lstm.wasm.js',

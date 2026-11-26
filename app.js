@@ -40,6 +40,20 @@
     cropHeight: '',
     pdfMode: 'raster',
     pdfDpi: 150,
+    scanMode: 'off',
+    freeCrop: false,
+    cropRect: null,
+    pdfTargetEnabled: false,
+    pdfTargetMB: 2,
+    stampPosition: 'bottom-right',
+    stampScale: 20,
+    stampOpacity: 100,
+    stampPages: 'last',
+    pdfPageSize: 'a4',
+    pdfOrientation: 'auto',
+    pdfMarginMM: 0,
+    pdfTrimMM: 0,
+    formFlatten: true,
     pageSize: 'a4',
     margin: 24,
     orientation: 'auto',
@@ -100,6 +114,11 @@
       event.returnValue = '';
     });
     document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape' && app.busy && !document.querySelector('dialog[open]')) {
+        event.preventDefault();
+        cancelCurrentRun();
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey) || event.key !== 'Enter') return;
       var button = document.getElementById('runBtn');
       if (button && !button.disabled) {
@@ -239,6 +258,21 @@
     s.numberStart = Math.max(1, Math.round(Number(input.numberStart) || 1));
     s.numberSize = Math.round(C.clampNumber(input.numberSize === undefined ? 10 : input.numberSize, 6, 36));
     s.ocrDpi = [150, 200, 300].indexOf(Number(input.ocrDpi)) !== -1 ? Number(input.ocrDpi) : 200;
+    s.scanMode = ['off', 'grayscale', 'contrast', 'bw'].indexOf(input.scanMode) !== -1 ? input.scanMode : 'off';
+    s.freeCrop = !!input.freeCrop;
+    s.cropRect = C.normalizeCropRect(input.cropRect);
+    s.pdfTargetEnabled = !!input.pdfTargetEnabled;
+    s.pdfTargetMB = C.clampNumber(input.pdfTargetMB === undefined ? 2 : input.pdfTargetMB, 0, 200);
+    s.stampPosition = ['bottom-right', 'bottom-left', 'top-right', 'top-left', 'center'].indexOf(input.stampPosition) !== -1
+      ? input.stampPosition : 'bottom-right';
+    s.stampScale = Math.round(C.clampNumber(input.stampScale === undefined ? 20 : input.stampScale, 2, 90));
+    s.stampOpacity = Math.round(C.clampNumber(input.stampOpacity === undefined ? 100 : input.stampOpacity, 5, 100));
+    s.stampPages = String(input.stampPages || 'last');
+    s.pdfPageSize = ['a4', 'letter', 'original'].indexOf(input.pdfPageSize) !== -1 ? input.pdfPageSize : 'a4';
+    s.pdfOrientation = ['auto', 'portrait', 'landscape'].indexOf(input.pdfOrientation) !== -1 ? input.pdfOrientation : 'auto';
+    s.pdfMarginMM = Math.round(C.clampNumber(input.pdfMarginMM === undefined ? 0 : input.pdfMarginMM, 0, 50));
+    s.pdfTrimMM = Math.round(C.clampNumber(input.pdfTrimMM === undefined ? 0 : input.pdfTrimMM, 0, 25));
+    s.formFlatten = input.formFlatten === undefined ? true : !!input.formFlatten;
     if (window.optiEngine) {
       if (s.format === 'image/avif' && !window.optiEngine.supportsType('image/avif')) s.format = 'auto';
       if (s.format === 'image/webp' && !window.optiEngine.supportsType('image/webp')) s.format = 'auto';
@@ -277,7 +311,12 @@
         background: s.background,
         letterbox: s.background === 'black' ? 'black' : 'white',
         pdfMode: s.pdfMode,
-        pdfDpi: s.pdfDpi
+        pdfDpi: s.pdfDpi,
+        scanMode: s.scanMode,
+        cropRect: s.freeCrop ? s.cropRect : null,
+        pdfTargetEnabled: s.pdfTargetEnabled,
+        pdfTargetMB: s.pdfTargetMB,
+        pdfTargetBytes: s.pdfTargetEnabled ? Math.round(s.pdfTargetMB * 1024 * 1024) : 0
       },
       overrides || {}
     );
@@ -322,9 +361,10 @@
       this.onChange(type, item, this);
     }
 
-    add(fileList) {
+    async add(fileList) {
       var self = this;
-      var incoming = Array.prototype.slice.call(fileList || []);
+      var expanded = await expandArchives(fileList);
+      var incoming = expanded;
       if (!incoming.length) return;
 
       var accepted = [];
@@ -630,6 +670,12 @@
         }
       }
       size.appendChild(savings);
+      if (item.result.compliance) {
+        var compliancePill = document.createElement('span');
+        compliancePill.className = 'savings ' + (item.result.compliance.ok ? '' : 'is-error');
+        compliancePill.textContent = item.result.compliance.ok ? 'preset ✓' : 'preset ✗';
+        size.appendChild(compliancePill);
+      }
     }
   }
 
@@ -719,9 +765,9 @@
     var groups = [
       { name: 'images', ids: ['squeeze', 'crop', 'convert'] },
       { name: 'pdf · organise', ids: ['merge', 'split', 'extract', 'delete', 'reorder', 'rotate'] },
-      { name: 'pdf · convert', ids: ['images-to-pdf', 'pdf-to-images', 'ocr'] },
-      { name: 'pdf · edit', ids: ['compress-pdf', 'watermark', 'page-numbers'] },
-      { name: 'pdf · secure', ids: ['protect', 'unlock'] }
+      { name: 'pdf · convert', ids: ['images-to-pdf', 'pdf-to-images', 'pdf-to-text', 'ocr'] },
+      { name: 'pdf · edit', ids: ['compress-pdf', 'watermark', 'page-numbers', 'sign-pdf', 'resize-pdf', 'fill-form'] },
+      { name: 'pdf · secure', ids: ['protect', 'unlock', 'clean-metadata'] }
     ];
 
     return groups
@@ -756,19 +802,19 @@
               '<p class="hint">Files are decoded, re-encoded and written by this tab. There are no uploads, accounts, analytics or tracking. Every tool, including OCR, works fully offline after the first load; the English OCR model is bundled.</p>' +
             '</div>' +
             '<div class="panel"><h2 class="panel-title">quality &amp; limits</h2>' +
-              '<p class="hint">Squeezing reduces quality by design; the estimator encodes a real sample so you can see the trade-off before running. Rasterising a PDF flattens its text into images — use “Keep text” when the PDF must stay selectable. Animated GIFs become a single frame. Password tools use AES-256 and require a modern browser.</p>' +
+              '<p class="hint">Squeezing reduces quality by design; the estimator encodes a real sample so you can see the trade-off before running. Rasterising a PDF flattens its text into images — use “Keep text” when the PDF must stay selectable. Animated GIFs become a single frame; multi-page TIFFs process the first page. Password tools use AES-256 and require a modern browser. A “signature” is a visual image stamp, not a cryptographic signature.</p>' +
             '</div>' +
             '<div class="panel"><h2 class="panel-title">size presets</h2>' +
               '<p class="hint">Passport, visa and government-form dimensions and limits are commonly cited values, not legal advice. Requirements change; always confirm with the issuing authority before uploading.</p>' +
             '</div>' +
             '<div class="panel"><h2 class="panel-title">credits</h2>' +
-              '<p class="hint">Built with PDF.js, pdf-lib, heic2any, JSZip and Tesseract.js (OCR only). Interface language inspired by <a href="https://pdf.esdy.cc/" rel="noreferrer noopener">Estudely PDF</a>. Type: IBM Plex Mono and Instrument Sans.</p>' +
+              '<p class="hint">Built with PDF.js, pdf-lib, heic2any, UTIF, JSZip and Tesseract.js (OCR only). Interface language inspired by <a href="https://pdf.esdy.cc/" rel="noreferrer noopener">Estudely PDF</a>. Type: IBM Plex Mono and Instrument Sans.</p>' +
               '<p class="hint mt-8">Made by <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">Harsh Banker</a> · <a href="https://harshbanker.com" target="_blank" rel="noreferrer noopener">harshbanker.com</a>.</p>' +
             '</div>' +
           '</div>' +
           '<aside class="col-side">' +
             '<div class="panel"><h2 class="panel-title">keyboard</h2>' +
-              '<p class="hint"><code>⌘/Ctrl + Enter</code> runs the current tool.<br><code>Esc</code> closes the compare view.<br>Everything is reachable with <kbd>Tab</kbd>.</p>' +
+              '<p class="hint"><code>⌘/Ctrl + Enter</code> runs the current tool.<br><code>Esc</code> cancels a running job or closes the compare view.<br>Everything is reachable with <kbd>Tab</kbd>.</p>' +
             '</div>' +
           '</aside>' +
         '</div>' +
@@ -822,8 +868,8 @@
     }
   }
 
-  function openToolPicker(fileList) {
-    var files = Array.prototype.slice.call(fileList || []);
+  async function openToolPicker(fileList) {
+    var files = await expandArchives(fileList);
     if (!files.length) return;
     var supported = files.filter(function (file) { return C.isSupported(file); });
     if (!supported.length) {
@@ -853,7 +899,7 @@
       ids = ['squeeze', 'crop', 'convert', 'images-to-pdf'];
     } else if (pdfs.length && !images.length) {
       if (pdfs.length === 1) {
-        ids = ['compress-pdf', 'split', 'extract', 'delete', 'reorder', 'rotate', 'pdf-to-images', 'watermark', 'page-numbers', 'protect', 'unlock', 'ocr'];
+        ids = ['compress-pdf', 'split', 'extract', 'delete', 'reorder', 'rotate', 'pdf-to-images', 'pdf-to-text', 'watermark', 'page-numbers', 'sign-pdf', 'resize-pdf', 'fill-form', 'protect', 'unlock', 'clean-metadata', 'ocr'];
       } else {
         ids = ['merge', 'compress-pdf'];
         note = 'Page tools work on one PDF at a time. Add a single PDF for split, extract, rotate and the rest.';
@@ -942,21 +988,29 @@
 
   function acceptAttr(kind) {
     var images = 'image/png,image/jpeg,image/webp,image/avif,image/gif,image/bmp,image/svg+xml,.heic,.heif,.tif,.tiff,.jxl';
-    if (kind === 'pdf') return '.pdf,application/pdf';
-    if (kind === 'images') return images;
-    return images + ',.pdf,application/pdf';
+    var archive = ',.zip,application/zip';
+    if (kind === 'pdf') return '.pdf,application/pdf' + archive;
+    if (kind === 'images') return images + archive;
+    return images + ',.pdf,application/pdf' + archive;
   }
 
   function uploaderHtml(id, options) {
     var opts = options || {};
+    var showFolder = opts.folder !== false && opts.multiple !== false;
     return (
-      '<input type="file" id="' + id + '-input" accept="' + acceptAttr(opts.accept) + '"' + (opts.multiple ? ' multiple' : '') + ' hidden>' +
-      '<button type="button" class="dropzone' + (opts.compact ? ' compact' : '') + '" id="' + id + '-zone">' +
-        '<span class="legend">· ' + (opts.compact ? 'add files' : 'files') + ' ·</span>' +
-        '<span class="dz-title">' + (opts.title || 'Select files') + '</span>' +
-        '<span class="dz-sub">' + (opts.sub || 'or drop them here') + '</span>' +
-        (opts.note ? '<span class="dz-note">' + opts.note + '</span>' : '') +
-      '</button>'
+      '<div class="uploader-wrap">' +
+        '<input type="file" id="' + id + '-input" accept="' + acceptAttr(opts.accept) + '"' + (opts.multiple ? ' multiple' : '') + ' hidden>' +
+        '<button type="button" class="dropzone' + (opts.compact ? ' compact' : '') + '" id="' + id + '-zone">' +
+          '<span class="legend">· ' + (opts.compact ? 'add files' : 'files') + ' ·</span>' +
+          '<span class="dz-title">' + (opts.title || 'Select files') + '</span>' +
+          '<span class="dz-sub">' + (opts.sub || 'or drop them here') + '</span>' +
+          (opts.note ? '<span class="dz-note">' + opts.note + '</span>' : '') +
+        '</button>' +
+        (showFolder
+          ? '<input type="file" id="' + id + '-folder" webkitdirectory multiple hidden>' +
+            '<button type="button" class="link-btn folder-btn" id="' + id + '-folderBtn">or add a folder / ZIP</button>'
+          : '') +
+      '</div>'
     );
   }
 
@@ -971,6 +1025,17 @@
       if (input.files && input.files.length) onFiles(Array.prototype.slice.call(input.files));
       input.value = '';
     });
+    var folderInput = document.getElementById(id + '-folder');
+    var folderBtn = document.getElementById(id + '-folderBtn');
+    if (folderInput && folderBtn) {
+      folderBtn.addEventListener('click', function () {
+        folderInput.click();
+      });
+      folderInput.addEventListener('change', function () {
+        if (folderInput.files && folderInput.files.length) onFiles(Array.prototype.slice.call(folderInput.files));
+        folderInput.value = '';
+      });
+    }
     zone.addEventListener('dragover', function (event) {
       event.preventDefault();
       zone.classList.add('is-dragover');
@@ -1081,6 +1146,40 @@
     }, 30);
   }
 
+  function isCancelled() {
+    return !!(window.optiCancelToken && window.optiCancelToken.cancelled);
+  }
+
+  function isAbortError(error) {
+    return !!(error && (error.name === 'AbortError' || /^cancelled$/i.test(String(error.message || ''))));
+  }
+
+  function startCancelToken() {
+    app.cancelToken = { cancelled: false };
+    window.optiCancelToken = app.cancelToken;
+    return app.cancelToken;
+  }
+
+  function cancelCurrentRun() {
+    if (app.cancelToken) app.cancelToken.cancelled = true;
+    var button = document.getElementById('cancelBtn');
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'cancelling…';
+    }
+  }
+
+  function endCancelToken() {
+    window.optiCancelToken = null;
+    app.cancelToken = null;
+    var button = document.getElementById('cancelBtn');
+    if (button) {
+      button.hidden = true;
+      button.disabled = false;
+      button.textContent = 'cancel';
+    }
+  }
+
   function revealResult(zone) {
     if (!zone) return;
     requestAnimationFrame(function () {
@@ -1129,6 +1228,58 @@
     });
   }
 
+  function mimeForFile(name) {
+    var ext = C.extOf(name);
+    var map = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+      avif: 'image/avif', gif: 'image/gif', bmp: 'image/bmp', svg: 'image/svg+xml',
+      heic: 'image/heic', heif: 'image/heif', tif: 'image/tiff', tiff: 'image/tiff',
+      jxl: 'image/jxl', pdf: 'application/pdf'
+    };
+    return map[ext] || '';
+  }
+
+  async function expandArchives(fileList) {
+    var incoming = Array.prototype.slice.call(fileList || []);
+    var out = [];
+    for (var i = 0; i < incoming.length; i++) {
+      var file = incoming[i];
+      var isZip = /\.zip$/i.test(file.name) || file.type === 'application/zip';
+      if (!isZip) {
+        out.push(file);
+        continue;
+      }
+      if (!window.JSZip) {
+        toast('ZIP support did not load. Reload and try again.', 'error');
+        continue;
+      }
+      try {
+        var zip = await window.JSZip.loadAsync(await file.arrayBuffer());
+        var names = Object.keys(zip.files);
+        var bytes = 0;
+        for (var j = 0; j < names.length && out.length < 220; j++) {
+          var entry = zip.files[names[j]];
+          if (entry.dir) continue;
+          var name = entry.name;
+          if (/(^|\/)(__MACOSX|\.DS_Store)/.test(name)) continue;
+          var mime = mimeForFile(name);
+          if (!mime || !C.isSupported({ name: name, type: mime })) continue;
+          var size = entry._data && entry._data.uncompressedSize ? entry._data.uncompressedSize : 0;
+          if (bytes + size > 500 * 1024 * 1024) {
+            toast('ZIP stopped at 500 MB of uncompressed files.', 'error');
+            break;
+          }
+          bytes += size;
+          var blob = await entry.async('blob');
+          out.push(new File([blob], name.split('/').pop(), { type: mime, lastModified: Date.now() }));
+        }
+      } catch (err) {
+        toast('Could not read ' + file.name + '.', 'error');
+      }
+    }
+    return out;
+  }
+
   function readJSON(key) {
     var raw = safeGet(key);
     if (!raw) return null;
@@ -1161,6 +1312,18 @@
     } catch (err) {
       /* noop */
     }
+  }
+
+  function parseStampPages(value, total) {
+    var text = String(value === undefined || value === null ? 'all' : value).trim().toLowerCase();
+    if (!text || text === 'all') {
+      var all = [];
+      for (var i = 1; i <= total; i++) all.push(i);
+      return all;
+    }
+    if (text === 'last') return [total];
+    if (text === 'first') return [1];
+    return C.parsePageSpec(text, total).pages;
   }
 
   function normalizeMime(value) {
@@ -1235,6 +1398,35 @@
             '<option value="exact">exactly — pad if needed</option>' +
             '<option value="atMost">at most — never exceed</option>' +
           '</select>' +
+          '<p class="hint mt-8" id="' + id + 'Hint"></p>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  function scanField(id) {
+    return (
+      '<div class="field">' +
+        '<label class="field-label" for="' + id + '">scan cleanup</label>' +
+        '<select class="select" id="' + id + '">' +
+          '<option value="off">off — keep colours</option>' +
+          '<option value="grayscale">grayscale</option>' +
+          '<option value="contrast">auto contrast</option>' +
+          '<option value="bw">black &amp; white</option>' +
+        '</select>' +
+        '<p class="hint">For photographed documents and scans. Black &amp; white is smallest.</p>' +
+      '</div>'
+    );
+  }
+
+  function pdfTargetField(id) {
+    return (
+      '<div class="field">' +
+        '<div class="field-head"><span class="field-label" id="' + id + 'Label">fit under</span>' +
+          '<label class="switch"><input type="checkbox" id="' + id + 'Toggle" aria-labelledby="' + id + 'Label"><span class="switch-track"></span></label>' +
+        '</div>' +
+        '<div id="' + id + 'Body" hidden>' +
+          '<div class="input-row mt-8"><input class="input" type="number" id="' + id + 'MB" min="0" step="0.1" value="2" aria-label="PDF target size in megabytes"><span class="unit-btn">MB</span></div>' +
           '<p class="hint mt-8" id="' + id + 'Hint"></p>' +
         '</div>' +
       '</div>'
@@ -1557,13 +1749,14 @@
   function canRunImages(files, options, requireSupportedCustom) {
     if (!files.items.length) return false;
     if (options.targetEnabled && !(Number(options.targetKB) > 0)) return false;
+    if (options.pdfTargetEnabled && !(Number(options.pdfTargetMB) > 0)) return false;
     if (requireSupportedCustom && options.format === 'custom') {
       if (!options.customMime || !E.supportsType(options.customMime)) return false;
     }
     return true;
   }
 
-  async function processImageItems(files, options, listEl, onItem, specific, outputSuffix) {
+  async function processImageItems(files, options, listEl, onItem, specific, outputSuffix, compliance) {
     var targets = specific && specific.length ? specific : pendingItems(files);
     if (!targets.length) return [];
     var cursor = 0;
@@ -1571,6 +1764,7 @@
 
     async function worker() {
       while (cursor < targets.length) {
+        if (isCancelled()) break;
         var item = targets[cursor++];
         if (!files.items.includes(item)) continue;
         item.status = 'processing';
@@ -1604,11 +1798,37 @@
             var tag = typeof outputSuffix === 'function' ? outputSuffix(item, result) : outputSuffix;
             result.fileName = C.outputFileName(item.name, result.mimeType || (item.meta && item.meta.mimeType) || 'image/jpeg', tag);
           }
+          if (compliance) {
+            var preset = Presets.byId(app.settings.presetId);
+            if (preset && preset.width) {
+              var dimsOk = result.width === preset.width && result.height === preset.height;
+              var sizeOk = !preset.maxKB || result.blob.size <= preset.maxKB * 1024;
+              result.compliance = {
+                ok: dimsOk && sizeOk,
+                dimsOk: dimsOk,
+                sizeOk: sizeOk,
+                label: preset.label,
+                maxKB: preset.maxKB || null,
+                width: result.width,
+                height: result.height,
+                size: result.blob.size
+              };
+            }
+          }
           item.status = 'done';
           item.progress = 100;
           item.result = result;
           item.note = result.note || '';
         } catch (err) {
+          if (isAbortError(err)) {
+            item.status = 'queued';
+            item.progress = 0;
+            item.result = null;
+            item.error = null;
+            item.note = '';
+            onItem(item, 'end');
+            break;
+          }
           item.status = 'error';
           item.progress = 0;
           item.result = null;
@@ -1687,6 +1907,22 @@
 
     box.appendChild(name);
     box.appendChild(meta);
+    if (entries.length === 1 && entries[0].item.note) {
+      var resultNote = document.createElement('p');
+      resultNote.className = 'result-meta';
+      resultNote.textContent = entries[0].item.note;
+      box.appendChild(resultNote);
+    }
+    if (entries.length === 1 && entries[0].item.result && entries[0].item.result.compliance) {
+      var compliance = entries[0].item.result.compliance;
+      var complianceLine = document.createElement('p');
+      complianceLine.className = 'compliance ' + (compliance.ok ? 'is-ok' : 'is-error');
+      var details = compliance.width + '×' + compliance.height + ' · ' + C.formatBytes(compliance.size);
+      if (compliance.maxKB) details += ' ≤ ' + compliance.maxKB + ' KB';
+      complianceLine.textContent = (compliance.ok ? '✓ meets ' : '✗ does not meet ') + compliance.label + ' — ' + details +
+        (compliance.ok ? '' : compliance.dimsOk ? ' · over the size cap' : ' · wrong dimensions');
+      box.appendChild(complianceLine);
+    }
     box.appendChild(actions);
     zone.appendChild(box);
   }
@@ -1715,6 +1951,7 @@
             '<h2 class="panel-title">image output</h2>' +
             qualityField('quality') +
             formatField('format') +
+            scanField('scan') +
             '<div class="field"><div class="field-head"><label class="field-label" for="scale">resize</label><span class="value" id="scaleOut">100%</span></div>' +
               '<input type="range" class="range" id="scale" min="20" max="100" step="5" value="100">' +
               '<div class="range-scale"><span>20%</span><span>100%</span></div>' +
@@ -1738,6 +1975,8 @@
                 '<option value="300">300 dpi — print</option>' +
               '</select>' +
             '</div>' +
+            scanField('pdfScan') +
+            pdfTargetField('pdfTarget') +
           '</div>' +
           '<p class="hint" id="mixNote" hidden>Image settings apply to images; PDF settings apply to PDFs.</p>' +
           '<div class="summary" id="summary"></div>' +
@@ -1795,6 +2034,11 @@
                 }).join('') +
               '</div>' +
             '</div>' +
+            '<div class="field"><span class="field-label">freeform</span>' +
+              '<label class="check"><input type="checkbox" id="freeCrop"> drag a selection on the preview</label>' +
+              '<p class="hint" id="freeCropHint">Pick any area. Output size follows the selection.</p>' +
+              '<button type="button" class="link-btn" id="freeCropReset" hidden>reset selection</button>' +
+            '</div>' +
             '<div class="field"><span class="field-label">background</span>' +
               '<div class="seg" id="bgSeg"><button type="button" data-bg="white">white</button><button type="button" data-bg="black">black</button><button type="button" data-bg="transparent">none</button></div>' +
             '</div>' +
@@ -1803,6 +2047,7 @@
             '<h2 class="panel-title">output</h2>' +
             qualityField('quality') +
             formatField('format') +
+            scanField('scan') +
             targetField('target') +
           '</div>' +
           '<div class="summary" id="summary"></div>' +
@@ -1829,6 +2074,7 @@
       actionLabel: 'crop & squeeze',
       requireSupportedCustom: true,
       crop: true,
+      compliance: true,
       outputSuffix: function (item, result) { return 'cropped-' + result.width + 'x' + result.height; }
     });
     document.title = 'Crop & size — Opti';
@@ -1848,6 +2094,7 @@
             '<h2 class="panel-title">convert</h2>' +
             formatField('format') +
             qualityField('quality') +
+            scanField('scan') +
             '<div class="field"><div class="field-head"><label class="field-label" for="scale">scale</label><span class="value" id="scaleOut">100%</span></div>' +
               '<input type="range" class="range" id="scale" min="20" max="100" step="5" value="100">' +
               '<div class="range-scale"><span>20%</span><span>100%</span></div></div>' +
@@ -1891,6 +2138,8 @@
               '<select class="select" id="pdfDpi"><option value="72">72 dpi</option><option value="150">150 dpi</option><option value="200">200 dpi</option><option value="300">300 dpi</option></select>' +
             '</div>' +
             qualityField('quality') +
+            scanField('pdfScan') +
+            pdfTargetField('pdfTarget') +
           '</div>' +
           '<div class="summary" id="summary"></div>' +
           '<div class="run-bar">' +
@@ -1923,6 +2172,15 @@
     var root = main;
     var estimates = new Map();
     var measuring = false;
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-quiet btn-wide';
+    cancelBtn.id = 'cancelBtn';
+    cancelBtn.textContent = 'cancel';
+    cancelBtn.hidden = true;
+    runBtn.parentNode.insertBefore(cancelBtn, runBtn.nextSibling);
+    cancelBtn.addEventListener('click', cancelCurrentRun);
 
     var estimator = new Estimator(files, config.options, function (map, isMeasuring) {
       estimates = map;
@@ -1984,6 +2242,10 @@
         return;
       }
       app.busy = true;
+      startCancelToken();
+      cancelBtn.hidden = false;
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = 'cancel';
       runBtn.disabled = true;
       runBtn.textContent = 'working…';
       runBar.style.width = '0%';
@@ -2003,7 +2265,7 @@
             renderList(list, files, { reorder: false, compare: true, onRetry: runItems });
             updateSummary(summary, files, estimates, measuring);
           }
-        }, targets, config.outputSuffix);
+        }, targets, config.outputSuffix, config.compliance);
 
         var done = files.items.filter(function (item) { return item.status === 'done'; });
         var failed = files.items.filter(function (item) { return item.status === 'error'; });
@@ -2029,11 +2291,22 @@
           announce(completed.length + ' files ready.');
         }
         revealResult(resultZone);
-        if (failed.length) toast(failed.length + ' failed — see the rows.', 'error');
+        if (isCancelled()) {
+          runStatus.textContent = 'cancelled';
+          toast('Cancelled — completed files are kept.', null);
+        } else if (failed.length) {
+          toast(failed.length + ' failed — see the rows.', 'error');
+        }
       } catch (err) {
-        runStatus.textContent = 'failed';
-        toast(err && err.message ? err.message : 'Something went wrong.', 'error');
+        if (isAbortError(err)) {
+          runStatus.textContent = 'cancelled';
+          toast('Cancelled — completed files are kept.', null);
+        } else {
+          runStatus.textContent = 'failed';
+          toast(err && err.message ? err.message : 'Something went wrong.', 'error');
+        }
       } finally {
+        endCancelToken();
         app.busy = false;
         estimator = new Estimator(files, config.options, function (map, isMeasuring) {
           estimates = map;
@@ -2147,6 +2420,65 @@
       syncPdf();
     }
 
+    [root.querySelector('#scan'), root.querySelector('#pdfScan')].forEach(function (select) {
+      if (!select) return;
+      select.value = app.settings.scanMode;
+      select.addEventListener('change', function () {
+        updateSettings({ scanMode: select.value });
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updateRun();
+      });
+    });
+
+    var pdfTargetToggle = root.querySelector('#pdfTargetToggle');
+    if (pdfTargetToggle) {
+      var pdfTargetBody = root.querySelector('#pdfTargetBody');
+      var pdfTargetMB = root.querySelector('#pdfTargetMB');
+      var pdfTargetHint = root.querySelector('#pdfTargetHint');
+      var syncPdfTarget = function () {
+        var enabled = app.settings.pdfTargetEnabled;
+        pdfTargetToggle.checked = enabled;
+        pdfTargetBody.hidden = !enabled;
+        if (document.activeElement !== pdfTargetMB) pdfTargetMB.value = String(app.settings.pdfTargetMB);
+        var value = Number(app.settings.pdfTargetMB);
+        pdfTargetHint.className = 'hint mt-8';
+        if (!(value > 0)) {
+          pdfTargetHint.textContent = 'Enter a size above 0 MB to enable the run.';
+          pdfTargetHint.classList.add('is-error');
+          return;
+        }
+        pdfTargetHint.textContent = 'Tries lower quality and resolution passes until the PDF is under ' + value +
+          ' MB. Text becomes non-selectable.';
+        if (app.settings.pdfMode === 'structure') {
+          pdfTargetHint.textContent = 'Target size needs the “rasterise” PDF engine. Switch it above.';
+          pdfTargetHint.classList.add('is-error');
+        }
+      };
+      pdfTargetToggle.addEventListener('change', function () {
+        updateSettings({ pdfTargetEnabled: pdfTargetToggle.checked });
+        syncPdfTarget();
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updateRun();
+      });
+      pdfTargetMB.addEventListener('input', function () {
+        var raw = pdfTargetMB.value;
+        var value = raw === '' ? 0 : Number(raw);
+        if (!isFinite(value) || value < 0) value = 0;
+        updateSettings({ pdfTargetMB: value });
+        syncPdfTarget();
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updateRun();
+      });
+      pdfTargetMB.addEventListener('blur', syncPdfTarget);
+      syncPdfTarget();
+    }
+
     var presetSelect = root.querySelector('#preset');
     if (presetSelect) {
       presetSelect.addEventListener('change', function () {
@@ -2246,6 +2578,15 @@
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-pressed', String(active));
       });
+      var freeCrop = root.querySelector('#freeCrop');
+      if (freeCrop) {
+        freeCrop.checked = s.freeCrop;
+        root.querySelector('#freeCropHint').textContent = s.freeCrop
+          ? (s.cropRect ? 'Selection saved. Drag a new area to replace it.' : 'Drag on the preview to select an area.')
+          : 'Pick any area. Output size follows the selection.';
+        var resetBtn = root.querySelector('#freeCropReset');
+        if (resetBtn) resetBtn.hidden = !s.freeCrop || !s.cropRect;
+      }
       root.querySelectorAll('#bgSeg [data-bg]').forEach(function (button) {
         var active = button.dataset.bg === s.background;
         button.classList.toggle('is-active', active);
@@ -2283,6 +2624,10 @@
         return;
       }
       var s = app.settings;
+      if (s.freeCrop) {
+        drawFreeformPreview(root, canvas, item);
+        return;
+      }
       var w = C.toPositiveInt(s.cropWidth) || item.meta.width;
       var h = C.toPositiveInt(s.cropHeight) || item.meta.height;
       var max = 520;
@@ -2309,6 +2654,135 @@
       note.textContent = 'preview · first image · output ' + w + '×' + h + ' px';
     }
 
+    // freeform crop preview + drag selection
+    function drawFreeformPreview(root, canvas, item) {
+      var s = app.settings;
+      var srcW = item.sample.width;
+      var srcH = item.sample.height;
+      var max = 520;
+      var scale = Math.min(1, max / Math.max(srcW, srcH));
+      canvas.width = Math.max(24, Math.round(srcW * scale));
+      canvas.height = Math.max(24, Math.round(srcH * scale));
+      var ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(item.sample, 0, 0, canvas.width, canvas.height);
+      var rect = freeformState.rect || s.cropRect;
+      if (rect) {
+        var rx = rect.x * canvas.width;
+        var ry = rect.y * canvas.height;
+        var rw = rect.w * canvas.width;
+        var rh = rect.h * canvas.height;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(0, 0, canvas.width, ry);
+        ctx.fillRect(0, ry + rh, canvas.width, canvas.height - ry - rh);
+        ctx.fillRect(0, ry, rx, rh);
+        ctx.fillRect(rx + rw, ry, canvas.width - rx - rw, rh);
+        ctx.strokeStyle = '#f5f0e6';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(rx, ry, rw, rh);
+      }
+      canvas.hidden = false;
+      root.querySelector('#previewEmpty').hidden = true;
+      root.querySelector('#previewNote').textContent = 'freeform · drag on the image to choose the crop area';
+      var note = root.querySelector('#freeCropHint');
+      if (note && rect) {
+        note.textContent = 'Selection ' + Math.round(rect.w * srcW) + '×' + Math.round(rect.h * srcH) +
+          ' px from ' + srcW + '×' + srcH + '.';
+      }
+    }
+
+    var freeformState = { drag: false, start: null, rect: null };
+
+    function canvasPoint(canvas, event) {
+      var bounds = canvas.getBoundingClientRect();
+      return {
+        x: Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)),
+        y: Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height))
+      };
+    }
+
+    function applyFreeformRect(rect) {
+      var item = files.items.find(function (entry) { return entry.sample && entry.meta; });
+      if (!item) return;
+      var width = Math.max(1, Math.round(rect.w * item.meta.width));
+      var height = Math.max(1, Math.round(rect.h * item.meta.height));
+      updateSettings({ cropRect: rect, cropWidth: width, cropHeight: height });
+      markStale(files);
+      refresh();
+      estimator.schedule();
+      updatePreview();
+      updateRun();
+    }
+
+    function bindFreeform() {
+      var canvas = root.querySelector('#previewCanvas');
+      var toggle = root.querySelector('#freeCrop');
+      var reset = root.querySelector('#freeCropReset');
+      if (!canvas || !toggle) return;
+      toggle.addEventListener('change', function () {
+        updateSettings({ freeCrop: toggle.checked });
+        freeformState.rect = null;
+        if (!toggle.checked) updateSettings({ cropRect: null });
+        else if (app.settings.cropRect) applyFreeformRectKeepSize(app.settings.cropRect);
+        markStale(files);
+        refresh();
+        estimator.schedule();
+        updatePreview();
+        updateRun();
+      });
+      function applyFreeformRectKeepSize(rect) {
+        freeformState.rect = rect;
+        updatePreview();
+      }
+      if (reset) {
+        reset.addEventListener('click', function () {
+          freeformState.rect = null;
+          updateSettings({ cropRect: null });
+          markStale(files);
+          refresh();
+          estimator.schedule();
+          updatePreview();
+          updateRun();
+        });
+      }
+      canvas.addEventListener('pointerdown', function (event) {
+        if (!app.settings.freeCrop) return;
+        event.preventDefault();
+        freeformState.drag = true;
+        freeformState.start = canvasPoint(canvas, event);
+        canvas.setPointerCapture(event.pointerId);
+      });
+      canvas.addEventListener('pointermove', function (event) {
+        if (!freeformState.drag || !freeformState.start) return;
+        var point = canvasPoint(canvas, event);
+        var start = freeformState.start;
+        var rect = {
+          x: Math.min(start.x, point.x),
+          y: Math.min(start.y, point.y),
+          w: Math.abs(point.x - start.x),
+          h: Math.abs(point.y - start.y)
+        };
+        if (rect.w < 0.01 || rect.h < 0.01) return;
+        freeformState.rect = rect;
+        updatePreview();
+      });
+      canvas.addEventListener('pointerup', function (event) {
+        if (!freeformState.drag) return;
+        freeformState.drag = false;
+        if (freeformState.rect) {
+          applyFreeformRect(freeformState.rect);
+          freeformState.rect = null;
+        } else {
+          updatePreview();
+        }
+      });
+      canvas.addEventListener('pointercancel', function () {
+        freeformState.drag = false;
+        freeformState.rect = null;
+        updatePreview();
+      });
+    }
+
     // label sync for quality etc.
     function syncLabels() {
       var quality = root.querySelector('#quality');
@@ -2333,6 +2807,7 @@
     if (config.crop) {
       syncCropControls();
       updatePreview();
+      bindFreeform();
     }
     bindUploader('files', function (selected) {
       files.add(selected);
@@ -2384,6 +2859,12 @@
           }) +
           '<div class="notice" id="toolNotice" hidden></div>' +
           '<ul class="queue" id="fileList" hidden></ul>' +
+          '<div class="page-thumbs-wrap" id="pageThumbsWrap" hidden>' +
+            '<div class="field-head"><span class="field-label">page picker</span>' +
+              '<button type="button" class="link-btn" id="thumbsAll">select all</button>' +
+            '</div>' +
+            '<div class="page-thumbs" id="pageThumbs"></div>' +
+          '</div>' +
           '<div id="resultZone"></div>' +
         '</div>' +
         '<aside class="col-side">' +
@@ -2412,6 +2893,14 @@
     var runBar = main.querySelector('#runBar');
     var runStatus = main.querySelector('#runStatus');
     var notice = main.querySelector('#toolNotice');
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn btn-quiet btn-wide';
+    cancelBtn.id = 'cancelBtn';
+    cancelBtn.textContent = 'cancel';
+    cancelBtn.hidden = true;
+    runBtn.parentNode.insertBefore(cancelBtn, runBtn.nextSibling);
+    cancelBtn.addEventListener('click', cancelCurrentRun);
     var ctx = {
       files: files,
       root: main,
@@ -2425,6 +2914,7 @@
       render: function () {
         renderList(list, files, { reorder: !!config.multiple, compare: false, onRetry: null });
         updateRun();
+        if (config.thumbnails) scheduleThumbs();
         if (config.onChange) config.onChange(ctx);
       },
       setProgress: function (percent, label) {
@@ -2460,6 +2950,123 @@
       runBtn.textContent = config.action;
     }
 
+    var thumbsWrap = main.querySelector('#pageThumbsWrap');
+    var thumbsHost = main.querySelector('#pageThumbs');
+    var thumbsAll = main.querySelector('#thumbsAll');
+    var thumbInput = config.thumbnails ? main.querySelector('#' + config.thumbnails.input) : null;
+    var thumbSig = '';
+    var thumbToken = 0;
+    var renderedTotal = 0;
+
+    function selectedFromInput(input, total) {
+      if (!input) return [];
+      return parseStampPages(input.value, total);
+    }
+
+    function syncThumbSelection() {
+      if (!thumbsHost) return;
+      var total = renderedTotal || (ctx.pages() || 0);
+      if (!total) return;
+      var selected = new Set(selectedFromInput(thumbInput, total));
+      thumbsHost.querySelectorAll('.thumb').forEach(function (button) {
+        var active = selected.has(Number(button.dataset.page));
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+    }
+
+    function toggleThumbPage(page, total) {
+      if (!thumbInput) return;
+      var selected = new Set(selectedFromInput(thumbInput, total));
+      if (selected.has(page)) {
+        if (selected.size === 1) return;
+        selected.delete(page);
+      } else {
+        selected.add(page);
+      }
+      thumbInput.value = C.formatPageSpec(Array.from(selected));
+      thumbInput.dispatchEvent(new Event('input', { bubbles: true }));
+      syncThumbSelection();
+    }
+
+    async function renderThumbs(item) {
+      var token = ++thumbToken;
+      thumbsHost.textContent = '';
+      renderedTotal = item.meta.pages;
+      var loading = document.createElement('p');
+      loading.className = 'hint';
+      loading.textContent = 'loading page thumbnails…';
+      thumbsHost.appendChild(loading);
+      try {
+        var total = await P.renderThumbnails(item.file, {
+          limit: 80,
+          cancelled: function () { return token !== thumbToken; }
+        }, function (page, count, canvas) {
+          if (token !== thumbToken) return;
+          if (page === 1) thumbsHost.textContent = '';
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'thumb';
+          button.dataset.page = String(page);
+          button.setAttribute('aria-pressed', 'false');
+          button.appendChild(canvas);
+          var label = document.createElement('span');
+          label.textContent = String(page);
+          button.appendChild(label);
+          button.addEventListener('click', function () { toggleThumbPage(page, count); });
+          thumbsHost.appendChild(button);
+          syncThumbSelection();
+        });
+        if (token !== thumbToken) return;
+        if (total > 80) {
+          var more = document.createElement('p');
+          more.className = 'hint';
+          more.textContent = 'Showing the first 80 of ' + total + ' pages. Type a range for the rest.';
+          thumbsHost.appendChild(more);
+        }
+        syncThumbSelection();
+      } catch (err) {
+        if (token !== thumbToken) return;
+        thumbsHost.textContent = '';
+        var failed = document.createElement('p');
+        failed.className = 'hint';
+        failed.textContent = 'Could not render page thumbnails for this PDF.';
+        thumbsHost.appendChild(failed);
+      }
+    }
+
+    function scheduleThumbs() {
+      if (!config.thumbnails || !thumbsHost || !thumbInput) return;
+      var item = files.items[0];
+      if (!item || !item.meta || !item.meta.pages) {
+        thumbsWrap.hidden = true;
+        thumbsHost.textContent = '';
+        thumbSig = '';
+        renderedTotal = 0;
+        return;
+      }
+      thumbsWrap.hidden = false;
+      var sig = item.file.name + '|' + item.file.size + '|' + item.meta.pages;
+      if (sig === thumbSig) {
+        syncThumbSelection();
+        return;
+      }
+      thumbSig = sig;
+      renderThumbs(item);
+    }
+
+    if (thumbInput) {
+      thumbInput.addEventListener('input', syncThumbSelection);
+    }
+    if (thumbsAll) {
+      thumbsAll.addEventListener('click', function () {
+        if (!thumbInput) return;
+        thumbInput.value = 'all';
+        thumbInput.dispatchEvent(new Event('input', { bubbles: true }));
+        syncThumbSelection();
+      });
+    }
+
     files.onChange = function (type) {
       ctx.render();
     };
@@ -2481,6 +3088,10 @@
         return;
       }
       ctx.setBusy(true);
+      startCancelToken();
+      cancelBtn.hidden = false;
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = 'cancel';
       runBar.style.width = '0%';
       runStatus.textContent = 'starting';
       resultZone.textContent = '';
@@ -2507,15 +3118,27 @@
           announce(entries.length + ' files ready.');
         }
         revealResult(resultZone);
+        if (isCancelled()) {
+          runStatus.textContent = 'cancelled';
+          toast('Cancelled — no output was written.', null);
+        }
       } catch (err) {
-        ctx.showError(err && err.message ? err.message : 'Something went wrong.');
-        runStatus.textContent = 'failed';
+        if (isAbortError(err)) {
+          runStatus.textContent = 'cancelled';
+          toast('Cancelled — no output was written.', null);
+        } else {
+          ctx.showError(err && err.message ? err.message : 'Something went wrong.');
+          runStatus.textContent = 'failed';
+        }
       } finally {
+        endCancelToken();
         ctx.setBusy(false);
       }
     });
 
     if (config.mount) config.mount(ctx);
+    onCleanup(function () { thumbToken++; });
+    scheduleThumbs();
     if (app.pendingFiles) {
       var pending = app.pendingFiles;
       app.pendingFiles = null;
@@ -2577,6 +3200,12 @@
 
     box.appendChild(name);
     box.appendChild(meta);
+    if (entries.length === 1 && entries[0].note) {
+      var resultNote = document.createElement('p');
+      resultNote.className = 'result-meta';
+      resultNote.textContent = entries[0].note;
+      box.appendChild(resultNote);
+    }
     box.appendChild(actions);
 
     if (entries.length > 1) {
@@ -2760,6 +3389,7 @@
     mountPdfTool(tool, {
       action: 'extract pages',
       resultLabel: 'pdf',
+      thumbnails: { input: 'pages' },
       mount: function (ctx) {
         ctxRef = ctx;
         var input = main.querySelector('#pages');
@@ -2813,6 +3443,7 @@
     mountPdfTool(tool, {
       action: 'delete pages',
       resultLabel: 'pdf',
+      thumbnails: { input: 'pages' },
       mount: function (ctx) {
         var input = main.querySelector('#pages');
         function sync() {
@@ -2931,6 +3562,7 @@
     mountPdfTool(tool, {
       action: 'rotate pages',
       resultLabel: 'pdf',
+      thumbnails: { input: 'pages' },
       mount: function (ctx) {
         var seg = main.querySelector('#angleSeg');
         seg.querySelector('[data-angle="90"]').classList.add('is-active');
@@ -3281,23 +3913,369 @@
         '<div class="field"><label class="field-label" for="ocrDpi">scan resolution</label>' +
           '<select class="select" id="ocrDpi"><option value="150">150 dpi — fast</option><option value="200">200 dpi — balanced</option><option value="300">300 dpi — slow</option></select>' +
         '</div>' +
+        pagesField('ocrPages', 'pages', 'all', 'all, or 1-3, 5') +
+        scanField('ocrScan') +
         '<p class="hint">English text only. Adds an invisible, selectable text layer over each page.</p>' +
         '<div class="notice">The OCR engine and English model are bundled. This runs fully offline; your PDF never leaves the device.</div>'
     });
     mountPdfTool(tool, {
       action: 'make searchable',
       resultLabel: 'pdf',
+      thumbnails: { input: 'ocrPages' },
       mount: function (ctx) {
         var dpi = main.querySelector('#ocrDpi');
+        var pages = main.querySelector('#ocrPages');
+        var scan = main.querySelector('#ocrScan');
         dpi.value = String(app.settings.ocrDpi);
+        scan.value = app.settings.scanMode;
         dpi.addEventListener('change', function () { updateSettings({ ocrDpi: Number(dpi.value) }); });
+        scan.addEventListener('change', function () { updateSettings({ scanMode: scan.value }); });
+        function syncPages() {
+          var total = ctx.pages();
+          if (!total) {
+            pageHint(main, 'ocrPagesHint', 'Add a PDF first.');
+            return;
+          }
+          var parsed = C.parsePageSpec(pages.value, total);
+          if (parsed.errors.length) pageHint(main, 'ocrPagesHint', parsed.errors[0], true);
+          else pageHint(main, 'ocrPagesHint', parsed.pages.length + ' of ' + total + ' pages selected.');
+        }
+        pages.addEventListener('input', syncPages);
+        ctx.files.onChange = function () {
+          ctx.render();
+          if (ctx.pages() && !pages.value) pages.value = 'all';
+          syncPages();
+        };
+        syncPages();
+      },
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) {
+        if (!ctx.pages()) return 'Add a readable PDF first.';
+        var parsed = C.parsePageSpec(main.querySelector('#ocrPages').value, ctx.pages());
+        if (parsed.errors.length) return parsed.errors[0];
+        if (!parsed.pages.length) return 'Select at least one page.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var total = ctx.pages();
+        var parsed = C.parsePageSpec(main.querySelector('#ocrPages').value, total);
+        return [await P.ocr(ctx.files.items[0].file, {
+          dpi: Number(main.querySelector('#ocrDpi').value),
+          pages: parsed.pages,
+          scanMode: main.querySelector('#ocrScan').value
+        }, progress)];
+      }
+    });
+  }
+
+  // ---------------------------------------------------------- new pdf tools --
+
+  function renderPdfToText(tool) {
+    pdfLayout(tool, {
+      action: 'extract text',
+      side:
+        '<h2 class="panel-title">text</h2>' +
+        '<p class="hint">Copies the text layer from digital PDFs. Scans need “Make searchable” first.</p>' +
+        '<div class="notice">Output is a plain <code>.txt</code> file. Layout and tables are flattened.</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'extract text',
+      resultLabel: 'text file',
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
+      run: async function (ctx, progress) {
+        return [await P.extractText(ctx.files.items[0].file, {}, progress)];
+      }
+    });
+    document.title = 'PDF to text — Opti';
+  }
+
+  function renderCleanMetadata(tool) {
+    pdfLayout(tool, {
+      action: 'clean metadata',
+      side:
+        '<h2 class="panel-title">metadata</h2>' +
+        '<p class="hint">Removes Title, Author, Subject, Keywords, Creator, Producer, dates and XMP.</p>' +
+        '<div class="notice">This removes document metadata, not visible content. Use a redaction tool for sensitive text.</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'clean metadata',
+      resultLabel: 'pdf',
+      canRun: function (ctx) { return !!ctx.pages(); },
+      validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
+      run: async function (ctx, progress) {
+        return [await P.cleanMetadata(ctx.files.items[0].file, {}, progress)];
+      }
+    });
+    document.title = 'Clean metadata — Opti';
+  }
+
+  function renderResizePdf(tool) {
+    pdfLayout(tool, {
+      action: 'rebuild pages',
+      side:
+        '<h2 class="panel-title">page size</h2>' +
+        '<div class="field"><label class="field-label" for="pdfPageSize">size</label>' +
+          '<select class="select" id="pdfPageSize"><option value="a4">A4</option><option value="letter">US Letter</option><option value="original">keep original</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="pdfOrientation">orientation</label>' +
+          '<select class="select" id="pdfOrientation"><option value="auto">auto</option><option value="portrait">portrait</option><option value="landscape">landscape</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="pdfMargin">margin (mm)</label>' +
+          '<input class="input" type="number" id="pdfMargin" min="0" max="50" step="1" value="0">' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="pdfTrim">trim (mm)</label>' +
+          '<input class="input" type="number" id="pdfTrim" min="0" max="25" step="1" value="0">' +
+          '<p class="hint">Trim hides the outer border with the page box. Text stays selectable.</p>' +
+        '</div>'
+    });
+    mountPdfTool(tool, {
+      action: 'rebuild pages',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var size = main.querySelector('#pdfPageSize');
+        var orientation = main.querySelector('#pdfOrientation');
+        var margin = main.querySelector('#pdfMargin');
+        var trim = main.querySelector('#pdfTrim');
+        size.value = app.settings.pdfPageSize;
+        orientation.value = app.settings.pdfOrientation;
+        margin.value = String(app.settings.pdfMarginMM);
+        trim.value = String(app.settings.pdfTrimMM);
+        size.addEventListener('change', function () { updateSettings({ pdfPageSize: size.value }); });
+        orientation.addEventListener('change', function () { updateSettings({ pdfOrientation: orientation.value }); });
+        margin.addEventListener('input', function () { updateSettings({ pdfMarginMM: Number(margin.value) || 0 }); });
+        trim.addEventListener('input', function () { updateSettings({ pdfTrimMM: Number(trim.value) || 0 }); });
       },
       canRun: function (ctx) { return !!ctx.pages(); },
       validate: function (ctx) { return ctx.pages() ? true : 'Add a readable PDF first.'; },
       run: async function (ctx, progress) {
-        return [await P.ocr(ctx.files.items[0].file, { dpi: Number(main.querySelector('#ocrDpi').value) }, progress)];
+        var mm = 72 / 25.4;
+        return [await P.resizePages(ctx.files.items[0].file, {
+          pageSize: main.querySelector('#pdfPageSize').value,
+          orientation: main.querySelector('#pdfOrientation').value,
+          margin: (Number(main.querySelector('#pdfMargin').value) || 0) * mm,
+          trim: (Number(main.querySelector('#pdfTrim').value) || 0) * mm
+        }, progress)];
       }
     });
+    document.title = 'Page size — Opti';
+  }
+
+  function renderSignPdf(tool) {
+    pdfLayout(tool, {
+      action: 'add signature',
+      side:
+        '<h2 class="panel-title">signature</h2>' +
+        '<div class="field"><label class="field-label" for="sigFile">image</label>' +
+          '<input class="input" type="file" id="sigFile" accept="image/png,image/jpeg,image/webp,image/avif,image/gif,.heic,.heif,.tif,.tiff" aria-label="Signature image">' +
+          '<p class="hint" id="sigName">PNG with transparency works best.</p>' +
+          '<img id="sigPreview" class="sig-preview" alt="" hidden>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="stampPosition">position</label>' +
+          '<select class="select" id="stampPosition"><option value="bottom-right">bottom right</option><option value="bottom-left">bottom left</option><option value="top-right">top right</option><option value="top-left">top left</option><option value="center">centre</option></select>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="stampScale">scale</label>' +
+          '<div class="input-row"><input class="input" type="number" id="stampScale" min="2" max="90" step="1" value="20"><span class="unit-btn">%</span></div>' +
+        '</div>' +
+        '<div class="field"><label class="field-label" for="stampOpacity">opacity</label>' +
+          '<div class="input-row"><input class="input" type="number" id="stampOpacity" min="5" max="100" step="5" value="100"><span class="unit-btn">%</span></div>' +
+        '</div>' +
+        pagesField('stampPages', 'pages', 'last', 'last, first, all, or 1-3') +
+        '<div class="notice">This is a visual signature image, not a cryptographic signature.</div>'
+    });
+    var signatureFile = null;
+    var previewUrl = null;
+    var sigInput = null;
+    var updateRunButton = null;
+    mountPdfTool(tool, {
+      action: 'add signature',
+      resultLabel: 'pdf',
+      thumbnails: { input: 'stampPages' },
+      mount: function (ctx) {
+        sigInput = main.querySelector('#sigFile');
+        var sigName = main.querySelector('#sigName');
+        var preview = main.querySelector('#sigPreview');
+        var position = main.querySelector('#stampPosition');
+        var scale = main.querySelector('#stampScale');
+        var opacity = main.querySelector('#stampOpacity');
+        var pages = main.querySelector('#stampPages');
+        position.value = app.settings.stampPosition;
+        scale.value = String(app.settings.stampScale);
+        opacity.value = String(app.settings.stampOpacity);
+        pages.value = app.settings.stampPages || 'last';
+        position.addEventListener('change', function () { updateSettings({ stampPosition: position.value }); });
+        scale.addEventListener('input', function () { updateSettings({ stampScale: Number(scale.value) || 20 }); });
+        opacity.addEventListener('input', function () { updateSettings({ stampOpacity: Number(opacity.value) || 100 }); });
+        pages.addEventListener('input', function () { updateSettings({ stampPages: pages.value }); });
+        sigInput.addEventListener('change', function () {
+          var file = sigInput.files && sigInput.files[0];
+          if (!file) return;
+          var kind = C.kindOf(file);
+          if (kind === 'pdf' || kind === 'unknown') {
+            toast('Choose a PNG, JPEG, WebP, HEIC or TIFF image.', 'error');
+            sigInput.value = '';
+            return;
+          }
+          signatureFile = file;
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          previewUrl = URL.createObjectURL(file);
+          preview.src = previewUrl;
+          preview.hidden = false;
+          sigName.textContent = file.name + ' · ' + C.formatBytes(file.size);
+          ctx.render();
+          updateRunButton();
+        });
+        updateRunButton = function () {
+          var button = main.querySelector('#runBtn');
+          if (button) button.disabled = app.busy || !ctx.pages() || !signatureFile;
+        };
+        onCleanup(function () {
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+        });
+        ctx.render();
+        updateRunButton();
+      },
+      canRun: function (ctx) { return !!ctx.pages() && !!signatureFile; },
+      validate: function (ctx) {
+        if (!ctx.pages()) return 'Add a readable PDF first.';
+        if (!signatureFile) return 'Add a signature image.';
+        var pages = parseStampPages(main.querySelector('#stampPages').value, ctx.pages());
+        if (!pages.length) return 'Choose at least one page.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var total = ctx.pages();
+        var pages = parseStampPages(main.querySelector('#stampPages').value, total);
+        return [await P.stampImage(ctx.files.items[0].file, signatureFile, {
+          pages: pages,
+          position: main.querySelector('#stampPosition').value,
+          scale: Number(main.querySelector('#stampScale').value) || 20,
+          opacity: Number(main.querySelector('#stampOpacity').value) || 100
+        }, progress)];
+      }
+    });
+    document.title = 'Sign & stamp — Opti';
+  }
+
+  function renderFillForm(tool) {
+    pdfLayout(tool, {
+      action: 'fill form',
+      side:
+        '<h2 class="panel-title">form fields</h2>' +
+        '<button type="button" class="btn btn-quiet btn-wide" id="readFormBtn">read form fields</button>' +
+        '<p class="hint" id="formHint">Upload a PDF, then read its AcroForm fields.</p>' +
+        '<div id="formFields" class="form-fields"></div>' +
+        '<label class="check mt-12"><input type="checkbox" id="formFlatten" checked> flatten fields after filling</label>'
+    });
+    var loaded = false;
+    var fieldEntries = [];
+    mountPdfTool(tool, {
+      action: 'fill form',
+      resultLabel: 'pdf',
+      mount: function (ctx) {
+        var readBtn = main.querySelector('#readFormBtn');
+        var hint = main.querySelector('#formHint');
+        var fieldsHost = main.querySelector('#formFields');
+        var flatten = main.querySelector('#formFlatten');
+        flatten.checked = app.settings.formFlatten;
+        flatten.addEventListener('change', function () { updateSettings({ formFlatten: flatten.checked }); });
+
+        function renderFields() {
+          fieldsHost.textContent = '';
+          fieldEntries.forEach(function (field) {
+            if (field.type === 'other') return;
+            var row = document.createElement('div');
+            row.className = 'field';
+            var label = document.createElement('label');
+            label.className = 'field-label';
+            label.textContent = field.name;
+            row.appendChild(label);
+            var input;
+            if (field.type === 'checkbox') {
+              var checkWrap = document.createElement('label');
+              checkWrap.className = 'check';
+              input = document.createElement('input');
+              input.type = 'checkbox';
+              input.checked = !!field.value;
+              checkWrap.appendChild(input);
+              checkWrap.appendChild(document.createTextNode(' checked'));
+              row.appendChild(checkWrap);
+            } else if (field.type === 'radio' || field.type === 'choice') {
+              input = document.createElement('select');
+              input.className = 'select';
+              var blank = document.createElement('option');
+              blank.value = '';
+              blank.textContent = '—';
+              input.appendChild(blank);
+              (field.options || []).forEach(function (option) {
+                var opt = document.createElement('option');
+                opt.value = option;
+                opt.textContent = option;
+                if (field.value === option) opt.selected = true;
+                input.appendChild(opt);
+              });
+              row.appendChild(input);
+            } else if (field.type === 'text') {
+              input = document.createElement('input');
+              input.type = 'text';
+              input.className = 'input';
+              input.value = field.value || '';
+              row.appendChild(input);
+            }
+            if (input) {
+              input.dataset.field = field.name;
+              input.id = 'field-' + Math.random().toString(36).slice(2, 8);
+              label.setAttribute('for', input.id);
+            }
+            fieldsHost.appendChild(row);
+          });
+        }
+
+        readBtn.addEventListener('click', async function () {
+          if (!ctx.pages()) {
+            hint.textContent = 'Upload a PDF first.';
+            return;
+          }
+          readBtn.disabled = true;
+          hint.className = 'hint';
+          hint.textContent = 'Reading fields…';
+          try {
+            var info = await P.inspectForm(ctx.files.items[0].file);
+            fieldEntries = info.fields;
+            loaded = true;
+            renderFields();
+            hint.textContent = fieldEntries.length
+              ? fieldEntries.length + ' field' + (fieldEntries.length === 1 ? '' : 's') + ' found.'
+              : 'No AcroForm fields found in this PDF.';
+            ctx.render();
+          } catch (err) {
+            loaded = false;
+            hint.textContent = err && err.message ? err.message : 'Could not read form fields.';
+            hint.className = 'hint is-error';
+          } finally {
+            readBtn.disabled = false;
+          }
+        });
+      },
+      canRun: function (ctx) { return !!ctx.pages() && loaded && fieldEntries.length > 0; },
+      validate: function (ctx) {
+        if (!ctx.pages()) return 'Add a readable PDF first.';
+        if (!loaded) return 'Read the form fields first.';
+        if (!fieldEntries.length) return 'This PDF has no fillable fields.';
+        return true;
+      },
+      run: async function (ctx, progress) {
+        var values = {};
+        main.querySelectorAll('#formFields [data-field]').forEach(function (input) {
+          var name = input.dataset.field;
+          values[name] = input.type === 'checkbox' ? input.checked : input.value;
+        });
+        return [await P.fillForm(ctx.files.items[0].file, values, {
+          flatten: main.querySelector('#formFlatten').checked
+        }, progress)];
+      }
+    });
+    document.title = 'Fill form — Opti';
   }
 
   // -------------------------------------------------------------- compare --
@@ -3573,6 +4551,13 @@
       blurb: 'Save every page as a PNG or JPEG, one image per page.',
       view: renderPdfToImages
     },
+    'pdf-to-text': {
+      group: 'pdf · convert',
+      label: 'PDF to text',
+      card: 'PDF to text',
+      blurb: 'Copy the text layer out of a digital PDF as a .txt file.',
+      view: renderPdfToText
+    },
     ocr: {
       group: 'pdf · convert',
       label: 'Make searchable',
@@ -3601,6 +4586,27 @@
       blurb: 'Number pages at the top or bottom, starting where you like.',
       view: renderPageNumbers
     },
+    'sign-pdf': {
+      group: 'pdf · edit',
+      label: 'Sign & stamp',
+      card: 'Sign & stamp',
+      blurb: 'Place a signature or stamp image on selected pages.',
+      view: renderSignPdf
+    },
+    'resize-pdf': {
+      group: 'pdf · edit',
+      label: 'Page size',
+      card: 'Page size',
+      blurb: 'Rebuild pages at A4, Letter or the original size, with margins or a trim.',
+      view: renderResizePdf
+    },
+    'fill-form': {
+      group: 'pdf · edit',
+      label: 'Fill form',
+      card: 'Fill form',
+      blurb: 'Fill AcroForm fields, then optionally flatten them.',
+      view: renderFillForm
+    },
     protect: {
       group: 'pdf · secure',
       label: 'Add password',
@@ -3614,6 +4620,13 @@
       card: 'Remove password',
       blurb: 'Remove a PDF password you know and save an unlocked copy.',
       view: renderUnlock
+    },
+    'clean-metadata': {
+      group: 'pdf · secure',
+      label: 'Clean metadata',
+      card: 'Clean metadata',
+      blurb: 'Remove title, author, producer, dates and XMP from a PDF.',
+      view: renderCleanMetadata
     }
   };
 

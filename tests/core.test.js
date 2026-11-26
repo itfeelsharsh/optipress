@@ -137,7 +137,7 @@ test('normalizeSettings repairs bad values', () => {
   assert.equal(settings.resizeMode, 'scale');
   assert.equal(settings.format, 'auto');
   assert.equal(settings.pdfDpi, 150);
-  assert.equal(settings.targetKB, 10);
+  assert.equal(settings.targetKB, 0);
   assert.equal(settings.preset, 'custom');
 });
 
@@ -159,4 +159,20 @@ test('presetSettings exposes the three named presets', () => {
   assert.equal(C.presetSettings('juicy').quality, 78);
   assert.equal(C.presetSettings('max').scale, 75);
   assert.equal(C.presetSettings('nope'), null);
+});
+
+test('formatPageSpec compresses sorted page lists into ranges', () => {
+  assert.equal(C.formatPageSpec([1, 2, 3, 5]), '1-3, 5');
+  assert.equal(C.formatPageSpec([6, 5, 4]), '4-6');
+  assert.equal(C.formatPageSpec([2, 2, 4]), '2, 4');
+  assert.equal(C.formatPageSpec([]), '');
+});
+
+test('normalizeCropRect clamps a freeform region inside the image', () => {
+  const region = C.normalizeCropRect({ x: 0.8, y: -0.2, w: 0.5, h: 0.4 });
+  assert.ok(region.x <= 0.5);
+  assert.equal(region.y, 0);
+  assert.equal(region.w, 0.5);
+  assert.equal(C.normalizeCropRect({ w: 0, h: 0.4 }), null);
+  assert.equal(C.normalizeCropRect(null), null);
 });
